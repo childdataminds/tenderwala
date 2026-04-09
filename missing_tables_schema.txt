@@ -1,0 +1,71 @@
+TenderWala Missing Tables Schema (MySQL)
+
+1) all_tenders_table
+CREATE TABLE IF NOT EXISTS all_tenders_table (
+  id VARCHAR(191) NOT NULL,
+  title TEXT NULL,
+  city VARCHAR(191) NULL,
+  category VARCHAR(191) NULL,
+  publish_date VARCHAR(64) NULL,
+  opening_datetime VARCHAR(64) NULL,
+  details LONGTEXT NULL,
+  doc_link TEXT NULL,
+  department VARCHAR(255) NULL,
+  PRIMARY KEY (id),
+  KEY idx_all_tenders_city (city),
+  KEY idx_all_tenders_category (category),
+  KEY idx_all_tenders_opening (opening_datetime)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+2) user_tenders_table
+CREATE TABLE IF NOT EXISTS user_tenders_table (
+  user_phone VARCHAR(20) NOT NULL,
+  tender_ids LONGTEXT NULL,
+  PRIMARY KEY (user_phone)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+3) remind_table
+CREATE TABLE IF NOT EXISTS remind_table (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  phone VARCHAR(20) NOT NULL,
+  tender_id VARCHAR(191) NOT NULL,
+  tender_table VARCHAR(80) NOT NULL,
+  reminder_time VARCHAR(64) NULL,
+  message TEXT NULL,
+  status VARCHAR(30) NULL,
+  sent_on VARCHAR(64) NULL,
+  created_on VARCHAR(64) NULL,
+  PRIMARY KEY (id),
+  KEY idx_remind_phone (phone),
+  KEY idx_remind_status (status),
+  KEY idx_remind_time (reminder_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+4) ai_summary_usage_table
+CREATE TABLE IF NOT EXISTS ai_summary_usage_table (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  phone VARCHAR(20) NOT NULL,
+  month_key VARCHAR(7) NOT NULL,
+  used_count INT NOT NULL DEFAULT 0,
+  updated_on VARCHAR(64) NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ai_summary_phone_month (phone, month_key),
+  KEY idx_ai_summary_month (month_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+5) reminder_me_table
+CREATE TABLE IF NOT EXISTS reminder_me_table (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  phone VARCHAR(20) NOT NULL,
+  tender_id VARCHAR(191) NOT NULL,
+  tender_table VARCHAR(80) NOT NULL,
+  reminder_time VARCHAR(64) NULL,
+  message TEXT NULL,
+  status VARCHAR(30) NULL,
+  sent_on VARCHAR(64) NULL,
+  created_on VARCHAR(64) NULL,
+  PRIMARY KEY (id),
+  KEY idx_reminder_me_phone (phone),
+  KEY idx_reminder_me_status (status),
+  KEY idx_reminder_me_time (reminder_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

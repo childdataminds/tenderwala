@@ -1,0 +1,134 @@
+1 - change made: added demo of 10 tenders for visitors
+logic: when a visitor presses Free Demo, system sends 10 demo tenders, then starts registration.
+implemented: added new function send_demo_tenders in main_class.py and updated Free Demo button flow in main.py.
+
+2 - change made: restricted Free Demo to one-time use per visitor
+logic: Free Demo now marks user as REGISTERING before demo send; on next press, user is no longer VISITOR so demo is blocked.
+implemented: changed existing Free Demo handler in main.py.
+
+3 - change made: fixed Sindh document id handling
+logic: document id is normalized before API calls; invalid/missing ids are handled safely with clear failure reasons.
+implemented: added new function normalize_doc_id and updated get_fileGUID, get_doc, and scrap_sindh_ppra in sindh_ppra.py.
+
+4 - change made: improved Sindh document download failure messaging
+logic: if Sindh document cannot be fetched, user receives a clean unavailable message instead of raw debug output.
+implemented: changed existing function download_bid_docs in main_class.py.
+
+5 - change made: fixed Federal PPRA document link saving
+logic: scraper now opens tender detail page and stores direct PDF link (download tender document) instead of detail-page URL.
+implemented: added new function get_tender_doc_link and updated document link assignment in ppra_scraping.py.
+
+6 - change made: fixed Sindh document binary download mapping
+logic: download API now uses dmS_FileID as payload ID and dmS_FileGUID as idsList, taken from document detail API.
+implemented: added new function get_file_details and updated get_doc in sindh_ppra.py.
+
+7 - change made: hardened Sindh scraper runtime behavior
+logic: initialize ppra_data safely, ensure static/documents directory exists before write, and prevent auto-scraping on module import.
+implemented: changed __init__, get_doc write path setup, and moved bottom test block under __main__ in sindh_ppra.py.
+
+8 - change made: fixed AJK document link base resolution
+logic: scraper now resolves document hrefs against the real AJK PPRA domain instead of a placeholder URL.
+implemented: changed existing base URL variable and download link assignment in ajk_ppra.py.
+
+9 - change made: downloaded all currently available AJK tender documents
+logic: scraped AJK advertisements page, resolved all document links, and downloaded each file to local storage.
+implemented: executed bulk download script and saved 24 files in static/documents/ajk_bulk_download.
+
+10 - change made: verified and hardened Gilgit document links
+logic: confirmed Gilgit document links are reachable PDFs and made parsing robust for relative hrefs and short rows.
+implemented: added base URL join for document/view links, updated column length check, and moved test block under __main__ in gilgit_ppra.py.
+
+11 - change made: fixed Gilgit scraper constructor indentation regression
+logic: corrected constructor indentation so scraper class loads without syntax errors.
+implemented: fixed base_url assignment indentation in gilgit_ppra.py.
+
+12 - change made: implemented and fixed Balochistan scraper docs-link logic
+logic: replaced placeholder probe script with API-based scraper and document-link generation aligned with BPPRA frontend flow (NIT/report/bidding routes).
+implemented: rewrote balochistan_ppra.py with Balochistan_Scraper class, API fetch, expiry filtering, and build_document_link logic.
+
+13 - change made: added send_tenders cron broadcast for eligible users
+logic: new cron flag send_tenders now sends tenders to all users except statuses UNPAID and VISITOR(S), with per-user language context and summary reporting.
+implemented: added SendTendersCron class, eligible-users query, user loop with send_tenders dispatch, and thread_func routing in cron_executor.py.
+
+14 - change made: added membership cron status checks and notifications
+logic: new cron flag membership checks each user subscription date, sends expiry reminder for subscriptions ending within 7 days, and sends rejoin message if subscription is already expired.
+implemented: added MembershipCron class with subs_date parsing, reminder/expired messaging, summary reporting, and thread_func routing in cron_executor.py.
+
+15 - change made: updated paid user welcome message and feature list
+logic: paid users now receive a clear welcome-back message that lists all available functions (Send Tenders, Change Settings, Change Language).
+implemented: updated paid_user_func in main_class.py.
+
+16 - change made: updated unpaid user message to ask for re-subscription
+logic: users with UNPAID status now receive a direct renewal prompt asking them to subscribe again to continue receiving tenders.
+implemented: updated unpaid_user_func in main_class.py with Urdu/English renewal messaging.
+
+17 - change made: added hourly engage cron for inactive users
+logic: new cron flag engage checks users_table.last_texted_on; if user inactive for 12+ hours, sends AI engagement prompt with YES/NO buttons.
+implemented: added EngageCron class in cron_executor.py with datetime parsing, inactivity threshold check, prompt sender, and admin summary.
+
+18 - change made: wired engage cron target into scheduler routing
+logic: engage now runs through the same cron entry path as existing targets.
+implemented: updated thread_func target routing in cron_executor.py to include engage.
+
+19 - change made: engagement anti-spam update
+logic: after successful engagement message send, last_texted_on is updated so same user is not re-engaged every hour.
+implemented: update_texted_on call added in EngageCron send loop in cron_executor.py.
+
+20 - change made: added reminder cron to process due reminders
+logic: new cron flag reminder checks reminder_me_table, parses reminder_time, and sends reminder message when due time is reached.
+implemented: added ReminderCron class in cron_executor.py with due-check loop, message dispatch, and admin summary.
+
+21 - change made: added sent-state update for reminders
+logic: after successful reminder send, record is marked SENT (and sent_on where available) to avoid duplicate reminder sends.
+implemented: added _mark_sent helper and status guard logic in ReminderCron in cron_executor.py.
+
+22 - change made: added reminder table mapping to database schema layer
+logic: backend db_execute now recognizes reminder_me_table so reminder cron can query and update it safely.
+implemented: added reminder_me_table columns mapping in databases.py and added reminder target routing in thread_func in cron_executor.py.
+
+23 - change made: implemented remind_me in main_class.py
+logic: when user taps Remind Me, system now saves reminder against phone number, tender number, and tender table instead of no-op.
+implemented: added database insert flow, validation, duplicate check, and user success/failure responses in remind_me function in main_class.py.
+
+24 - change made: added remind_table compatibility in database schema map
+logic: remind_me now targets remind_table first (as requested) with fallback support to reminder_me_table for existing deployments.
+implemented: added remind_table mapping in databases.py and table-detection fallback logic in main_class.py.
+
+25 - change made: implemented ai_summary in main_class.py
+logic: when user taps Tender Summary (AI), system fetches tender doc, generates a quick summary from extracted text/metadata, and sends it to user.
+implemented: added ai_summary end-to-end flow with tender lookup, temporary doc download, text extraction, summary build, and message delivery in main_class.py.
+
+26 - change made: added monthly AI summary usage limit (50/user/month)
+logic: each user now has a monthly cap of 50 AI summaries; request is blocked after cap is reached.
+implemented: added usage read/update helpers and limit enforcement in main_class.py with month_key-based tracking.
+
+27 - change made: added ai summary usage table mapping in schema layer
+logic: backend db_execute now recognizes ai_summary_usage_table for storing monthly usage counters.
+implemented: added ai_summary_usage_table mapping in databases.py.
+
+28 - change made: added new train_tenders.py for training-data export
+logic: no existing train file was found, so a new script now pulls tenders from all tender tables and packs them into a PKL dataset.
+implemented: created train_tenders.py with table fetch, row normalization, and PKL output generation (latest + timestamp snapshot).
+
+29 - change made: added daily 11:30 scheduler mode in train_tenders.py
+logic: script can now run continuously and execute export automatically every day at 11:30 AM.
+implemented: added internal daily scheduler loop with --daily, --hour, and --minute arguments in train_tenders.py.
+
+30 - change made: implemented change_settings_func with category list flow
+logic: Change Settings now sends list message with Provinces, Categories, and Types; user selection redirects to that specific settings step.
+implemented: added change_settings_func, list selection handler, scoped settings input processing, and all-button processing in main_class.py; integrated list/button handling in main.py webhook.
+
+31 - change made: implemented direct_ask tender retrieval flow
+logic: direct_ask <query> now loads tenders model file and returns latest relevant tenders using OpenAI when API key is available, with local relevance fallback otherwise.
+implemented: added direct_ask, model loader, ranking/format helpers in main_class.py and command routing in main.py text handler.
+
+
+# upto STEP 8C DONE
+
+32 - change made: added 24-hour window aware delivery for all cron messages
+logic: cron sends now check each recipient's last_texted_on; if within 24 hours, send plain text via api.send_message, otherwise send a WhatsApp template message.
+implemented: added CronMessageDispatcher in cron_executor.py, routed all cron outbound messaging through it (scraping, delete, send_tenders, membership, engage, reminder), and updated get_whatsapp_templates in whatsappAPIs.py to return template metadata.
+
+33 - change made: improved registration input error handling and fixed Urdu language loading
+logic: during registration, invalid input now returns a clear correction instruction with example format (e.g., 1,3 or ALL); language setup now reads user lang from the correct DB column so Urdu users get Urdu responses.
+implemented: updated setup and registering_user in main_class.py and added _registration_input_help helper.
