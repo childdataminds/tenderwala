@@ -84,22 +84,22 @@ class DBClass:
         "database": conn,
         "table":"visitors_table",
         "columns":["name","phone","date"]
-    },
-    "remind_table": {
-     "database": conn,
-     "table":"remind_table",
-     "columns":["id","phone","tender_id","tender_table","reminder_time","message","status","sent_on","created_on"]
-       },
-             "ai_summary_usage_table": {
-                "database": conn,
-                "table":"ai_summary_usage_table",
-                "columns":["id","phone","month_key","used_count","updated_on"]
-             },
-       "reminder_me_table": {
+        },
+        "remind_table": {
+        "database": conn,
+        "table":"remind_table",
+        "columns":["id","phone","tender_id","tender_table","reminder_time","message","status","sent_on","created_on"]
+        },
+        "ai_summary_usage_table": {
+        "database": conn,
+        "table":"ai_summary_usage_table",
+        "columns":["id","phone","month_key","used_count","updated_on"]
+        },
+        "reminder_me_table": {
         "database": conn,
         "table":"reminder_me_table",
         "columns":["id","phone","tender_id","tender_table","reminder_time","message","status","sent_on","created_on"]
-       }
+        }
    }
     }
     def __init__(self):

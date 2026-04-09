@@ -184,12 +184,12 @@ class Sindh_Scrapper:
                 return [False]
         else:      
             return [False,f"Sindh: Invalid Response {str(resp.status_code)}\n Message: {resp.content}"]
-if __name__ == "__main__":
-    from utils import ScrapingUtils
-    utils = ScrapingUtils()
-    sindh = Sindh_Scrapper(utils)
-    li = sindh.initiate_scraper()
-    print(len(sindh.ppra_data))
-    for row in sindh.ppra_data:
-        print(row["document"])
-        id_ = sindh.get_doc(row["document"])
+# if __name__ == "__main__":
+#     from utils import ScrapingUtils
+#     utils = ScrapingUtils()
+#     sindh = Sindh_Scrapper(utils)
+#     li = sindh.initiate_scraper()
+#     print(len(sindh.ppra_data))
+#     for row in sindh.ppra_data:
+#         print(row["document"])
+#         id_ = sindh.get_doc(row["document"])
