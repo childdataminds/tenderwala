@@ -23,7 +23,7 @@ class DBClass:
        "users_table": {
         "database": conn,
         "table":"users_table",
-        "columns":["phone","email","status","joitn_date","subs_date","name","lang","last_texted_on"]
+        "columns":["phone","email","status","join_date","subs_date","name","lang","last_texted_on"]
        },    
        "manage_images": {
         "database": conn,

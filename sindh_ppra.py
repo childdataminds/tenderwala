@@ -184,6 +184,7 @@ class Sindh_Scrapper:
                 return [False]
         else:      
             return [False,f"Sindh: Invalid Response {str(resp.status_code)}\n Message: {resp.content}"]
+
 # if __name__ == "__main__":
 #     from utils import ScrapingUtils
 #     utils = ScrapingUtils()
