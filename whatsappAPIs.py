@@ -21,7 +21,7 @@ class metaWhatsappAPI:
         self.user_type = None
         self.utils = Utilities()
         
-        self.register_steps = ["provinces","types","punjab_cities","sindh_cities","kpk_cities","ajk_cities","blochi_cities","gilgit_cities","categories"]
+        self.register_steps = ["provinces","types","punjab_cities","sindh_cities","kpk_cities","ajk_cities","balochistan_cities","gilgit_cities","categories"]
         
     # ------------------ TEXT MESSAGE ------------------
     def send_message(self, text):

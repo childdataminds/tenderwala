@@ -149,7 +149,10 @@ Reply with Contact Us if you need assistance.
             for step in filter_data[2:]:
                 if c > 0:
                     self.is_prov_cities = True
-                if step == "empty":
+                if step is None:
+                    break
+                step_text = str(step).strip().lower()
+                if step_text == "" or step_text == "empty":
                     break
                 c += 1
             if c == 0:
@@ -257,7 +260,10 @@ Reply with Contact Us if you need assistance.
         for step in filter_data[2:]:
             if completed > 0:
                 is_prov_cities = True
-            if step == "empty":
+            if step is None:
+                break
+            step_text = str(step).strip().lower()
+            if step_text == "" or step_text == "empty":
                 break
             completed += 1
 

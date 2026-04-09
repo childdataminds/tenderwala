@@ -135,7 +135,11 @@ class ScrapingUtils:
        completed_steps = []
        c = 1
        for city in cities_col:
-            if city != "empty":
+            if city is None:
+                c += 1
+                continue
+            city_text = str(city).strip().lower()
+            if city_text != "" and city_text != "empty":
                 completed_steps.append(c)
             c += 1
        remaining_steps = []
