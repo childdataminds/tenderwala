@@ -157,16 +157,7 @@ def upload():
     file.save(os.path.join("uploads", file.filename))
     return {"status": "uploaded"}
 
-@app.route('/send_message', methods=['POST'])
-def send_message_to_admin():
-    data = request.get_json()
-    message = data.get('message')
-    if message:
-        tenderwala.api.sender = "923056842507"  # Admin's phone number
-        tenderwala.api.send_message(message)
-        return jsonify({"status": "Message sent successfully"})
-    else:
-        return jsonify({"status": "Error: Phone number and message are required"}), 
+
 
 @app.route('/webhook', methods=["GET", "POST"])
 def policy_doc():
