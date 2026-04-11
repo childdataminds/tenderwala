@@ -1674,6 +1674,12 @@ Reply with Contact Us if you need assistance.
         text = str(value).strip().lower()
         return text in ["", "n/a", "none", "null"]
 
+    def _list_na_or_empty(self, items):
+        if not isinstance(items, list) or len(items) == 0:
+            return True
+        valid = [x for x in items if not self._na_or_empty(x)]
+        return len(valid) == 0
+
     def _fill_na_insights_with_ai(self, insights, doc_text, tender_meta):
         openai_key, model = self._openai_config()
         if openai_key == "":
@@ -1682,21 +1688,25 @@ Reply with Contact Us if you need assistance.
         needs_fill = (
             self._na_or_empty(insights.get("cdr_amount"))
             or self._na_or_empty(insights.get("estimate_amount"))
-            or len(insights.get("documents_required", [])) == 0
-            or len(insights.get("evaluation_criteria", [])) == 0
+            or self._list_na_or_empty(insights.get("documents_required", []))
+            or self._list_na_or_empty(insights.get("evaluation_criteria", []))
         )
         if not needs_fill:
             return insights
 
-        compact_doc = self._sanitize_doc_text_for_summary(doc_text)[:10000]
+        compact_doc = self._sanitize_doc_text_for_summary(doc_text)
+        if len(compact_doc) < 600:
+            compact_doc = re.sub(r"\s+", " ", str(doc_text)).strip()
+        compact_doc = compact_doc[:14000]
         payload = {
             "model": model,
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "You extract structured tender facts from text. "
-                        "Return strict JSON only. Use N/A only when truly unavailable."
+                        "You extract structured tender facts from procurement documents. "
+                        "Return strict JSON only. Prefer concrete values from document text and metadata. "
+                        "Use N/A only when a value is truly not present."
                     ),
                 },
                 {
@@ -1705,6 +1715,7 @@ Reply with Contact Us if you need assistance.
                         "Return ONLY valid JSON with keys: "
                         "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_points. "
                         "documents_required/evaluation_criteria/overall_points must be arrays of short strings. "
+                        "If a field can be inferred from nearby wording, provide best value instead of N/A. "
                         f"Tender metadata: {json.dumps(tender_meta, ensure_ascii=False)}\n"
                         f"Current extracted hints: {json.dumps(insights, ensure_ascii=False)}\n"
                         f"Document text: {compact_doc}"
@@ -1750,7 +1761,7 @@ Reply with Contact Us if you need assistance.
                 current = merged.get(key, [])
                 if not isinstance(current, list):
                     current = []
-                if len(current) == 0:
+                if self._list_na_or_empty(current):
                     candidate = parsed.get(key, [])
                     if isinstance(candidate, list):
                         merged[key] = [str(x).strip() for x in candidate if str(x).strip() != ""][:5]
