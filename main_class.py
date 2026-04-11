@@ -1858,36 +1858,21 @@ Reply with Contact Us if you need assistance.
                     "role": "system",
                     "content": (
                         "You are an expert procurement assistant for WhatsApp users. "
-                        "Generate a clean, practical tender summary from provided data. "
-                        "Ignore website navigation/footer boilerplate and malformed HTML fragments. "
-                        "If a detail is not available, write N/A."
+                        "Return strict JSON only with separated fields. "
+                        "Use N/A only when the value is truly unavailable in both metadata and text."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        "Create output in this exact structure:\n"
-                        "AI Quick Tender Summary\n"
-                        "1) CDR Amount: ...\n"
-                        "2) Estimate Amount: ...\n"
-                        "3) Documents Required:\n"
-                        "- ...\n"
-                        "- ...\n"
-                        "4) Evaluation Criteria:\n"
-                        "- ...\n"
-                        "- ...\n"
-                        "5) Overall Summary:\n"
-                        "- ...\n"
-                        "- ...\n"
-                        "\n"
-                        "Guidelines:\n"
-                        "- Keep response compact for WhatsApp\n"
-                        "- Keep bullet lists short (max 4 items each)\n"
-                        "- Do not include markdown headings or extra sections\n"
-                        "- Do not copy website menu/footer text\n"
-                        "- Determine CDR Amount and Estimate Amount primarily from document text and metadata\n"
-                        "- CDR can be either currency value or percentage (example: 2%)\n"
-                        "- Use N/A only if value is truly not present in both document text and metadata\n"
+                        "Return ONLY JSON object with these keys exactly:\n"
+                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_summary\n"
+                        "Rules:\n"
+                        "- documents_required, evaluation_criteria, overall_summary must be arrays of short strings\n"
+                        "- max 4 items per array\n"
+                        "- derive cdr_amount and estimate_amount from document and metadata\n"
+                        "- prefer concrete values over N/A when reasonable from context\n"
+                        "- no markdown, no prose outside JSON\n"
                         f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=False)}\n"
                         f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=False)}\n"
                         f"Document text (cleaned): {cleaned_doc_text[:12000]}"
@@ -1915,7 +1900,59 @@ Reply with Contact Us if you need assistance.
             answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             if answer == "":
                 return [False, "openai_empty_response", ""]
-            return [True, "", answer]
+
+            start = answer.find("{")
+            end = answer.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return [False, "openai_non_json_response", ""]
+
+            parsed = json.loads(answer[start:end + 1])
+
+            cdr_amount = str(parsed.get("cdr_amount", "N/A")).strip() or "N/A"
+            estimate_amount = str(parsed.get("estimate_amount", "N/A")).strip() or "N/A"
+
+            docs = parsed.get("documents_required", [])
+            if not isinstance(docs, list):
+                docs = []
+            docs = [str(x).strip() for x in docs if str(x).strip() != ""][:4]
+
+            evals = parsed.get("evaluation_criteria", [])
+            if not isinstance(evals, list):
+                evals = []
+            evals = [str(x).strip() for x in evals if str(x).strip() != ""][:4]
+
+            overall = parsed.get("overall_summary", [])
+            if not isinstance(overall, list):
+                overall = []
+            overall = [str(x).strip() for x in overall if str(x).strip() != ""][:4]
+
+            lines = [
+                "AI Quick Tender Summary",
+                f"1) CDR Amount: {cdr_amount if cdr_amount != '' else 'N/A'}",
+                f"2) Estimate Amount: {estimate_amount if estimate_amount != '' else 'N/A'}",
+                "3) Documents Required:",
+            ]
+            if len(docs) == 0:
+                lines.append("- N/A")
+            else:
+                for item in docs:
+                    lines.append(f"- {item}")
+
+            lines.append("4) Evaluation Criteria:")
+            if len(evals) == 0:
+                lines.append("- N/A")
+            else:
+                for item in evals:
+                    lines.append(f"- {item}")
+
+            lines.append("5) Overall Summary:")
+            if len(overall) == 0:
+                lines.append("- N/A")
+            else:
+                for item in overall:
+                    lines.append(f"- {item}")
+
+            return [True, "", "\n".join(lines)]
         except Exception as e:
             return [False, f"openai_error: {str(e)}", ""]
 
