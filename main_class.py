@@ -2229,28 +2229,39 @@ Reply with Contact Us if you need assistance.
 
         now_text = str(self.security_utils.get_datetime())
 
-        # Primary insert with tracking fields.
-        insert_payload = {
-            "db": "tenderwala",
-            "table": active_table,
-            "cols": ["phone", "tender_id", "tender_table", "reminder_time", "status", "created_on"],
-            "ops": "INSERT",
-            "where": None,
-            "value": [phone, tender_no, tender_table, now_text, "PENDING", now_text]
-        }
-        insert_resp = db_execute(insert_payload)
-
-        # Fallback for simpler table schemas.
-        if not insert_resp.get("status"):
-            fallback_insert = {
-                "db": "tenderwala",
-                "table": active_table,
+        generated_id = uuid4().hex
+        insert_attempts = [
+            {
+                "cols": ["phone", "tender_id", "tender_table", "reminder_time", "status", "created_on"],
+                "value": [phone, tender_no, tender_table, now_text, "PENDING", now_text]
+            },
+            {
+                "cols": ["id", "phone", "tender_id", "tender_table", "reminder_time", "message", "status", "sent_on", "created_on"],
+                "value": [generated_id, phone, tender_no, tender_table, now_text, "", "PENDING", "", now_text]
+            },
+            {
+                "cols": ["id", "phone", "tender_id", "tender_table"],
+                "value": [generated_id, phone, tender_no, tender_table]
+            },
+            {
                 "cols": ["phone", "tender_id", "tender_table"],
-                "ops": "INSERT",
-                "where": None,
                 "value": [phone, tender_no, tender_table]
             }
-            insert_resp = db_execute(fallback_insert)
+        ]
+
+        insert_resp = {"status": False, "message": "no_insert_attempted"}
+        for attempt in insert_attempts:
+            payload = {
+                "db": "tenderwala",
+                "table": active_table,
+                "cols": attempt["cols"],
+                "ops": "INSERT",
+                "where": None,
+                "value": attempt["value"]
+            }
+            insert_resp = db_execute(payload)
+            if insert_resp.get("status"):
+                break
 
         if insert_resp.get("status"):
             self.api.send_message("Reminder saved. I will notify you when reminder time is reached.")

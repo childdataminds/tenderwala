@@ -593,11 +593,11 @@ class ReminderCron:
             return f"Reminder: Tender {tender} from {table} is due for your follow-up."
         return "Reminder: Your saved tender follow-up time is reached."
 
-    def _mark_sent(self, reminder_id):
+    def _mark_sent_in_table(self, reminder_id, table_name):
         now_text = str(self.notify.security_utils.get_datetime())
         payload = {
             "db": "tenderwala",
-            "table": "reminder_me_table",
+            "table": table_name,
             "cols": ["status", "sent_on"],
             "ops": "UPDATE",
             "where": ["id"],
@@ -609,7 +609,7 @@ class ReminderCron:
 
         fallback_payload = {
             "db": "tenderwala",
-            "table": "reminder_me_table",
+            "table": table_name,
             "cols": ["status"],
             "ops": "UPDATE",
             "where": ["id"],
@@ -618,19 +618,43 @@ class ReminderCron:
         fallback_resp = db_execute(fallback_payload)
         return bool(fallback_resp.get("status"))
 
+    def _active_reminder_tables(self):
+        active = []
+        for table_name in ["reminder_me_table", "remind_table"]:
+            check_payload = {
+                "db": "tenderwala",
+                "table": table_name,
+                "cols": ["id"],
+                "ops": "SELECT",
+                "where": None,
+                "value": None
+            }
+            check_resp = db_execute(check_payload)
+            if check_resp.get("status"):
+                active.append(table_name)
+        return active
+
     def start(self, target):
-        payload = {
-            "db": "tenderwala",
-            "table": "reminder_me_table",
-            "cols": ["id", "phone", "tender_id", "tender_table", "reminder_time", "message", "status"],
-            "ops": "SELECT",
-            "where": None,
-            "value": None
-        }
-        resp = db_execute(payload)
-        if not resp.get("status"):
-            self.dispatcher.send(self.notify.api, ADMIN_PHONE, f"reminder cron failed: {str(resp)}")
+        active_tables = self._active_reminder_tables()
+        if len(active_tables) == 0:
+            self.dispatcher.send(self.notify.api, ADMIN_PHONE, "reminder cron failed: no reminder table found")
             return "Reminder Cron Failed"
+
+        rows_with_source = []
+        for table_name in active_tables:
+            payload = {
+                "db": "tenderwala",
+                "table": table_name,
+                "cols": ["id", "phone", "tender_id", "tender_table", "reminder_time", "message", "status"],
+                "ops": "SELECT",
+                "where": None,
+                "value": None
+            }
+            resp = db_execute(payload)
+            if not resp.get("status"):
+                continue
+            for row in resp.get("data", []):
+                rows_with_source.append((table_name, row))
 
         now = datetime.now()
         total_rows = 0
@@ -642,7 +666,7 @@ class ReminderCron:
         send_failed = 0
         update_failed = 0
 
-        for row in resp.get("data", []):
+        for source_table, row in rows_with_source:
             total_rows += 1
             reminder_id = row[0] if len(row) > 0 else None
             phone = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
@@ -675,7 +699,7 @@ class ReminderCron:
             sent = send_resp[0]
             if sent:
                 sent_rows += 1
-                updated = self._mark_sent(reminder_id)
+                updated = self._mark_sent_in_table(reminder_id, source_table)
                 if not updated:
                     update_failed += 1
                 self.notify.api.utils.update_texted_on(
@@ -688,6 +712,7 @@ class ReminderCron:
         self.notify.api.sender = ADMIN_PHONE
         summary = (
             "reminder cron completed\n"
+            + f"Source tables: {', '.join(active_tables)}\n"
             + f"Rows checked: {total_rows}\n"
             + f"Due reminders: {due_rows}\n"
             + f"Reminders sent: {sent_rows}\n"
