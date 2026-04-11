@@ -222,8 +222,8 @@ def policy_doc():
                 sent = True
 
                 # Send reply (IMPORTANT: you must use Meta send API here)
-                     if not button_msg:
-                         tenderwala.api.send_btn_msg(txt,["Change Settings","Change Language!"])
+                if not button_msg:
+                   tenderwala.api.send_btn_msg(txt,["Change Language!"])
 
             # 🔘 BUTTON REPLY
             elif message['type'] == "interactive":
