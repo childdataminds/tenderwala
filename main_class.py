@@ -1542,75 +1542,6 @@ Reply with Contact Us if you need assistance.
             return []
         return [s.strip() for s in re.split(r"(?<=[.!?;])\s+", compact) if s.strip() != ""]
 
-    def _chunk_text(self, text, chunk_size=1800, overlap=220):
-        src = re.sub(r"\s+", " ", str(text)).strip()
-        if src == "":
-            return []
-        if chunk_size <= 300:
-            chunk_size = 1800
-        if overlap < 0:
-            overlap = 0
-        step = chunk_size - overlap
-        if step <= 0:
-            step = chunk_size
-
-        chunks = []
-        start = 0
-        while start < len(src):
-            end = start + chunk_size
-            chunk = src[start:end].strip()
-            if chunk != "":
-                chunks.append(chunk)
-            if end >= len(src):
-                break
-            start += step
-        return chunks
-
-    def _select_best_chunks(self, chunks, keywords, max_chunks=6):
-        if not isinstance(chunks, list) or len(chunks) == 0:
-            return []
-
-        kw = [str(k).lower() for k in keywords if str(k).strip() != ""]
-        scored = []
-        for idx, ch in enumerate(chunks):
-            low = ch.lower()
-            score = 0
-            for k in kw:
-                if k in low:
-                    score += 2
-            # Prefer chunks that contain numbers/currency as they often carry core tender values.
-            if re.search(r"\b(?:rs\.?|pkr|%|\d{1,3}(?:,\d{3})+)\b", low):
-                score += 1
-            scored.append((score, idx, ch))
-
-        scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
-        picked = []
-        for score, idx, ch in scored:
-            if score <= 0 and len(picked) >= 2:
-                break
-            picked.append((idx, ch))
-            if len(picked) >= max_chunks:
-                break
-
-        if len(picked) == 0:
-            picked = [(0, chunks[0])]
-
-        picked.sort(key=lambda x: x[0])
-        return [x[1] for x in picked]
-
-    def _build_doc_excerpt_for_ai(self, doc_text, keywords, max_chunks=6):
-        chunks = self._chunk_text(doc_text, chunk_size=1800, overlap=220)
-        chosen = self._select_best_chunks(chunks, keywords, max_chunks=max_chunks)
-        if len(chosen) == 0:
-            return ""
-
-        lines = []
-        i = 1
-        for ch in chosen:
-            lines.append(f"[Chunk {i}] {ch}")
-            i += 1
-        return "\n".join(lines)
-
     def _pick_keyword_sentences(self, sentences, keywords, limit=4, min_len=25, max_len=220):
         results = []
         seen = set()
@@ -1848,23 +1779,10 @@ Reply with Contact Us if you need assistance.
         if not needs_fill:
             return insights
 
-        focus_keywords = []
-        if self._na_or_empty(insights.get("cdr_amount")):
-            focus_keywords.extend(["cdr", "bid security", "earnest money", "emd", "security deposit"])
-        if self._na_or_empty(insights.get("estimate_amount")):
-            focus_keywords.extend(["estimate", "estimated cost", "engineer estimate", "estimated amount"])
-        if self._list_na_or_empty(insights.get("documents_required", [])):
-            focus_keywords.extend(["documents required", "mandatory documents", "ntn", "strn", "pec", "affidavit", "bid form"])
-        if self._list_na_or_empty(insights.get("evaluation_criteria", [])):
-            focus_keywords.extend(["evaluation criteria", "technical evaluation", "financial evaluation", "qualification criteria", "marks", "weightage"])
-
         compact_doc = self._sanitize_doc_text_for_summary(doc_text)
         if len(compact_doc) < 600:
             compact_doc = re.sub(r"\s+", " ", str(doc_text)).strip()
-
-        excerpt = self._build_doc_excerpt_for_ai(compact_doc, focus_keywords, max_chunks=6)
-        if excerpt == "":
-            excerpt = compact_doc[:4000]
+        compact_doc = compact_doc[:50000]
         payload = {
             "model": model,
             "messages": [
@@ -1885,12 +1803,12 @@ Reply with Contact Us if you need assistance.
                         "If a field can be inferred from nearby wording, provide best value instead of N/A. "
                         f"Tender metadata: {json.dumps(tender_meta, ensure_ascii=False)}\n"
                         f"Current extracted hints: {json.dumps(insights, ensure_ascii=False)}\n"
-                        f"Document excerpt: {excerpt}"
+                        f"Document text: {compact_doc}"
                     ),
                 },
             ],
             "temperature": 0.1,
-            "max_tokens": 360,
+            "max_tokens": 420,
         }
         headers = {
             "Authorization": f"Bearer {openai_key}",
@@ -2001,17 +1919,6 @@ Reply with Contact Us if you need assistance.
         if str(estimate_hint).strip().lower() == "n/a" and (not self._is_blankish(meta_estimated_cost)):
             estimate_hint = str(meta_estimated_cost).strip()
 
-        summary_keywords = [
-            "cdr", "bid security", "earnest money", "emd",
-            "estimate", "estimated cost",
-            "documents required", "mandatory documents", "ntn", "strn", "pec",
-            "evaluation criteria", "technical evaluation", "financial evaluation", "qualification",
-            "scope", "work", "delivery", "timeline"
-        ]
-        summary_excerpt = self._build_doc_excerpt_for_ai(cleaned_doc_text, summary_keywords, max_chunks=6)
-        if summary_excerpt == "":
-            summary_excerpt = cleaned_doc_text[:5000]
-
         compact_payload = {
             "cdr_amount": cdr_hint,
             "estimate_amount": estimate_hint,
@@ -2053,12 +1960,12 @@ Reply with Contact Us if you need assistance.
                         "- no markdown, no prose outside JSON\n"
                         f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=False)}\n"
                         f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=False)}\n"
-                        f"Document excerpt: {summary_excerpt}"
+                        f"Document text (cleaned): {cleaned_doc_text[:50000]}"
                     ),
                 },
             ],
             "temperature": 0.2,
-            "max_tokens": 520,
+            "max_tokens": 700,
         }
         headers = {
             "Authorization": f"Bearer {openai_key}",
