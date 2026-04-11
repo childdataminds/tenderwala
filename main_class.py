@@ -1668,6 +1668,91 @@ Reply with Contact Us if you need assistance.
             "text_length": len(str(doc_text)),
         }
 
+    def _extract_regex_doc_insights(self, doc_text):
+        text = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if text == "":
+            return {
+                "cdr_amount": "N/A",
+                "estimate_amount": "N/A",
+                "documents_required": [],
+                "evaluation_criteria": [],
+            }
+
+        amount_pat = r"(?:rs\.?|pkr)?\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?|[0-9]{1,2}(?:\.[0-9]{1,2})?\s*%"
+
+        def _find_near_amount(keywords, window=140):
+            keys = "|".join([re.escape(k) for k in keywords])
+            if keys == "":
+                return "N/A"
+            m = re.search(rf"(?:{keys}).{{0,{window}}}?({amount_pat})", text, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+            m = re.search(rf"({amount_pat}).{{0,90}}?(?:{keys})", text, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+            return "N/A"
+
+        cdr_amount = _find_near_amount([
+            "cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"
+        ])
+        estimate_amount = _find_near_amount([
+            "estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value"
+        ])
+
+        doc_patterns = [
+            r"documents? required[:\-]?\s*([^\.\n]{20,260})",
+            r"mandatory documents?[:\-]?\s*([^\.\n]{20,260})",
+            r"submit(?:ted|ting)?[:\-]?\s*([^\.\n]{20,260})",
+        ]
+        eval_patterns = [
+            r"evaluation criteria[:\-]?\s*([^\.\n]{20,260})",
+            r"technical evaluation[:\-]?\s*([^\.\n]{20,260})",
+            r"financial evaluation[:\-]?\s*([^\.\n]{20,260})",
+            r"qualification criteria[:\-]?\s*([^\.\n]{20,260})",
+        ]
+
+        def _collect(patterns, limit=4):
+            out = []
+            seen = set()
+            for pat in patterns:
+                for m in re.finditer(pat, text, flags=re.IGNORECASE):
+                    val = re.sub(r"\s+", " ", str(m.group(1))).strip(" -:;,.\t")
+                    if len(val) < 12:
+                        continue
+                    key = val.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(val)
+                    if len(out) >= limit:
+                        return out
+            return out
+
+        return {
+            "cdr_amount": cdr_amount,
+            "estimate_amount": estimate_amount,
+            "documents_required": _collect(doc_patterns, 4),
+            "evaluation_criteria": _collect(eval_patterns, 4),
+        }
+
+    def _merge_missing_with_regex(self, insights, doc_text):
+        regex_insights = self._extract_regex_doc_insights(doc_text)
+        merged = dict(insights)
+
+        if self._na_or_empty(merged.get("cdr_amount")) and (not self._na_or_empty(regex_insights.get("cdr_amount"))):
+            merged["cdr_amount"] = regex_insights.get("cdr_amount")
+        if self._na_or_empty(merged.get("estimate_amount")) and (not self._na_or_empty(regex_insights.get("estimate_amount"))):
+            merged["estimate_amount"] = regex_insights.get("estimate_amount")
+
+        for key in ["documents_required", "evaluation_criteria"]:
+            current = merged.get(key, [])
+            if self._list_na_or_empty(current):
+                candidate = regex_insights.get(key, [])
+                if isinstance(candidate, list) and len(candidate) > 0:
+                    merged[key] = candidate[:4]
+
+        return merged
+
     def _na_or_empty(self, value):
         if value is None:
             return True
@@ -2043,6 +2128,7 @@ Reply with Contact Us if you need assistance.
             doc_text = self._extract_doc_text(local_path)
             insights = self._extract_rule_based_doc_insights(doc_text)
             insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
+            insights = self._merge_missing_with_regex(insights, doc_text)
             insights = self._fill_na_insights_with_ai(insights, doc_text, tender_meta)
             ai_resp = self._build_ai_quick_summary(insights, doc_text=doc_text, tender_meta=tender_meta)
             if ai_resp[0]:
