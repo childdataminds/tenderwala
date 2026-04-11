@@ -10,6 +10,8 @@ import pickle
 import requests
 import tempfile
 import datetime
+import zipfile
+from urllib.parse import unquote
 from sindh_ppra import Sindh_Scrapper
 
 # Hardcoded OpenAI config.
@@ -889,6 +891,144 @@ Reply with Contact Us if you need assistance.
         fallback_resp = db_execute(fallback_insert)
         return bool(fallback_resp.get("status"))
 
+    def _is_blankish(self, value):
+        if value is None:
+            return True
+        text = str(value).strip().lower()
+        return text in ["", "none", "null", "nan", "n/a"]
+
+    def _response_suffix_hint(self, url, resp):
+        known_exts = [".pdf", ".doc", ".docx", ".docm", ".rtf", ".txt", ".html", ".htm", ".xml"]
+
+        url_ext = os.path.splitext(str(url).split("?")[0])[1].lower()
+        if url_ext in known_exts:
+            return url_ext
+
+        disp = str(resp.headers.get("Content-Disposition", ""))
+        if disp.strip() != "":
+            filename_match = re.search(r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disp, flags=re.IGNORECASE)
+            if filename_match:
+                file_name = unquote(filename_match.group(1)).strip().strip('"')
+                file_ext = os.path.splitext(file_name)[1].lower()
+                if file_ext in known_exts:
+                    return file_ext
+
+        content_type = str(resp.headers.get("Content-Type", "")).lower()
+        if "application/pdf" in content_type:
+            return ".pdf"
+        if "officedocument.wordprocessingml.document" in content_type:
+            return ".docx"
+        if "msword" in content_type:
+            return ".doc"
+        if "text/html" in content_type:
+            return ".html"
+        if "application/rtf" in content_type or "text/rtf" in content_type:
+            return ".rtf"
+        if "text/plain" in content_type:
+            return ".txt"
+
+        magic = resp.content[:32]
+        lower_magic = magic.lower()
+        if magic.startswith(b"%PDF"):
+            return ".pdf"
+        if magic.startswith(b"PK\x03\x04"):
+            return ".docx"
+        if lower_magic.startswith(b"<!doctype html") or lower_magic.startswith(b"<html"):
+            return ".html"
+        return ".bin"
+
+    def _extract_docx_text(self, file_path):
+        chunks = []
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                xml_parts = [
+                    name
+                    for name in zf.namelist()
+                    if name.startswith("word/") and name.endswith(".xml")
+                ]
+
+                preferred = [
+                    "word/document.xml",
+                    "word/header1.xml",
+                    "word/header2.xml",
+                    "word/header3.xml",
+                    "word/footer1.xml",
+                ]
+
+                ordered = []
+                for name in preferred:
+                    if name in xml_parts:
+                        ordered.append(name)
+                for name in xml_parts:
+                    if name not in ordered:
+                        ordered.append(name)
+
+                for name in ordered[:8]:
+                    try:
+                        xml_text = zf.read(name).decode("utf-8", errors="ignore")
+                    except Exception:
+                        continue
+                    xml_text = xml_text.replace("</w:p>", "\n")
+                    plain = re.sub(r"<[^>]+>", " ", xml_text)
+                    plain = re.sub(r"\s+", " ", plain).strip()
+                    if plain != "":
+                        chunks.append(plain)
+        except Exception:
+            return ""
+
+        return "\n".join(chunks)
+
+    def _extract_html_text(self, file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                html_text = f.read(800000)
+        except Exception:
+            return ""
+
+        html_text = re.sub(r"<script[\s\S]*?</script>", " ", html_text, flags=re.IGNORECASE)
+        html_text = re.sub(r"<style[\s\S]*?</style>", " ", html_text, flags=re.IGNORECASE)
+        html_text = re.sub(r"<[^>]+>", " ", html_text)
+        html_text = re.sub(r"\s+", " ", html_text).strip()
+        return html_text
+
+    def _enrich_insights_with_tender_meta(self, insights, tender_meta):
+        merged = {
+            "cdr_amount": insights.get("cdr_amount", "N/A"),
+            "estimate_amount": insights.get("estimate_amount", "N/A"),
+            "documents_required": list(insights.get("documents_required", [])),
+            "evaluation_criteria": list(insights.get("evaluation_criteria", [])),
+            "overall_points": list(insights.get("overall_points", [])),
+            "text_length": insights.get("text_length", 0),
+        }
+
+        est_cost = tender_meta.get("estimated_cost")
+        if str(merged.get("estimate_amount", "N/A")).strip().lower() == "n/a" and (not self._is_blankish(est_cost)):
+            merged["estimate_amount"] = str(est_cost).strip()
+
+        meta_points = []
+        if not self._is_blankish(tender_meta.get("title")):
+            meta_points.append(f"Tender: {str(tender_meta.get('title')).strip()}")
+        if not self._is_blankish(tender_meta.get("department")):
+            meta_points.append(f"Department: {str(tender_meta.get('department')).strip()}")
+        if not self._is_blankish(tender_meta.get("city")):
+            meta_points.append(f"Location: {str(tender_meta.get('city')).strip()}")
+        if not self._is_blankish(tender_meta.get("category")) and str(tender_meta.get("category")).strip().lower() != "none":
+            meta_points.append(f"Category: {str(tender_meta.get('category')).strip()}")
+        if not self._is_blankish(tender_meta.get("date_opening")):
+            meta_points.append(f"Bid Opening: {str(tender_meta.get('date_opening')).strip()}")
+        if not self._is_blankish(tender_meta.get("date_published")):
+            meta_points.append(f"Published: {str(tender_meta.get('date_published')).strip()}")
+
+        seen = set([str(item).strip().lower() for item in merged["overall_points"]])
+        for point in meta_points:
+            key = point.lower()
+            if key not in seen:
+                merged["overall_points"].append(point)
+                seen.add(key)
+
+        merged["overall_points"] = merged["overall_points"][:6]
+        return merged
+
     def _download_doc_for_summary(self, doc_ref, table):
         if table == "sindh_table":
             sindh_scrap = Sindh_Scrapper(self.security_utils)
@@ -913,9 +1053,7 @@ Reply with Contact Us if you need assistance.
         if resp.status_code != 200:
             return [False, f"Document URL returned status {resp.status_code}", None, False]
 
-        suffix = os.path.splitext(url.split("?")[0])[1]
-        if suffix == "":
-            suffix = ".bin"
+        suffix = self._response_suffix_hint(url, resp)
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         tmp_file.write(resp.content)
         tmp_file.close()
@@ -926,6 +1064,23 @@ Reply with Contact Us if you need assistance.
             return ""
 
         ext = os.path.splitext(str(file_path))[1].lower()
+        magic = b""
+        try:
+            with open(file_path, "rb") as sig_fp:
+                magic = sig_fp.read(64)
+        except Exception:
+            magic = b""
+
+        if ext in ["", ".bin", ".tmp"]:
+            if magic.startswith(b"%PDF"):
+                ext = ".pdf"
+            elif magic.startswith(b"PK\x03\x04"):
+                ext = ".docx"
+            else:
+                low = magic.lower()
+                if low.startswith(b"<!doctype html") or low.startswith(b"<html"):
+                    ext = ".html"
+
         text = ""
         if ext == ".pdf":
             reader_cls = None
@@ -944,7 +1099,7 @@ Reply with Contact Us if you need assistance.
                     reader = reader_cls(file_path)
                     chunks = []
                     page_count = len(reader.pages)
-                    max_pages = 5 if page_count > 5 else page_count
+                    max_pages = 12 if page_count > 12 else page_count
                     for i in range(max_pages):
                         page_text = reader.pages[i].extract_text() or ""
                         if page_text.strip() != "":
@@ -952,6 +1107,10 @@ Reply with Contact Us if you need assistance.
                     text = "\n".join(chunks)
                 except Exception:
                     text = ""
+        elif ext in [".docx", ".docm"]:
+            text = self._extract_docx_text(file_path)
+        elif ext in [".html", ".htm", ".xml"]:
+            text = self._extract_html_text(file_path)
         else:
             try:
                 with open(file_path, "rb") as f:
@@ -1202,10 +1361,22 @@ Reply with Contact Us if you need assistance.
             self.api.send_message("Monthly AI Summary limit reached (50/50). Please try again next month.")
             return [False, "limit_reached"]
 
+        tender_cols = [
+            "document",
+            "title",
+            "department",
+            "city",
+            "category",
+            "date_published",
+            "date_opening",
+        ]
+        if tender_table == "sindh_table":
+            tender_cols.append("estimated_cost")
+
         tender_payload = {
             "db": "tenderwala",
             "table": tender_table,
-            "cols": ["document"],
+            "cols": tender_cols,
             "ops": "SELECT",
             "where": ["id"],
             "value": [tender_no]
@@ -1221,7 +1392,20 @@ Reply with Contact Us if you need assistance.
             return [False, "tender_not_found"]
 
         row = rows[0]
-        doc_ref = row[0] if len(row) > 0 else None
+        tender_map = {}
+        for i in range(len(tender_cols)):
+            tender_map[tender_cols[i]] = row[i] if len(row) > i else None
+
+        doc_ref = tender_map.get("document")
+        tender_meta = {
+            "title": tender_map.get("title"),
+            "department": tender_map.get("department"),
+            "city": tender_map.get("city"),
+            "category": tender_map.get("category"),
+            "date_published": tender_map.get("date_published"),
+            "date_opening": tender_map.get("date_opening"),
+            "estimated_cost": tender_map.get("estimated_cost"),
+        }
 
         if doc_ref is None or str(doc_ref).strip() == "" or str(doc_ref).lower() == "none":
             self.api.send_message("Document is not available for this tender. Cannot generate AI summary.")
@@ -1241,6 +1425,7 @@ Reply with Contact Us if you need assistance.
             cleanup_required = dl_resp[3]
             doc_text = self._extract_doc_text(local_path)
             insights = self._extract_rule_based_doc_insights(doc_text)
+            insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
             ai_resp = self._build_ai_quick_summary(insights)
             if ai_resp[0]:
                 summary_text = ai_resp[2]
