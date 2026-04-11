@@ -899,130 +899,145 @@ Reply with Contact Us if you need assistance.
         return datetime.datetime.now().strftime("%Y-%m")
 
     def _get_ai_summary_usage(self, phone):
-        payload = {
+        month_key = self._summary_month_key()
+
+        monthly_payload = {
             "db": "tenderwala",
             "table": "ai_summary_usage_table",
             "cols": ["id", "used_count"],
             "ops": "SELECT",
             "where": ["phone", "month_key"],
-            "value": [phone, self._summary_month_key()]
+            "value": [phone, month_key]
         }
-        resp = db_execute(payload)
-        if not resp.get("status"):
-            message = str(resp.get("message", ""))
-            if "Table Not found" in message and "ai_summary_usage_table" in message:
-                return [True, 0, None]
-            return [False, str(resp)]
+        monthly_resp = db_execute(monthly_payload)
+        if monthly_resp.get("status"):
+            monthly_rows = monthly_resp.get("data", [])
+            if len(monthly_rows) > 0:
+                best_row = monthly_rows[0]
+                best_count = 0
+                for row in monthly_rows:
+                    try:
+                        count = int(row[1])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                        best_row = row
+                return [True, best_count, best_row[0] if len(best_row) > 0 else None]
 
-        data = resp.get("data", [])
-        if len(data) == 0:
+        # Legacy fallback: some deployments track a single counter per phone.
+        legacy_with_id_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["id", "used_count"],
+            "ops": "SELECT",
+            "where": ["phone"],
+            "value": [phone]
+        }
+        legacy_with_id_resp = db_execute(legacy_with_id_payload)
+        if legacy_with_id_resp.get("status"):
+            rows = legacy_with_id_resp.get("data", [])
+            if len(rows) > 0:
+                best_row = rows[0]
+                best_count = 0
+                for row in rows:
+                    try:
+                        count = int(row[1])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                        best_row = row
+                return [True, best_count, best_row[0] if len(best_row) > 0 else None]
+
+        legacy_no_id_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["used_count"],
+            "ops": "SELECT",
+            "where": ["phone"],
+            "value": [phone]
+        }
+        legacy_no_id_resp = db_execute(legacy_no_id_payload)
+        if legacy_no_id_resp.get("status"):
+            rows = legacy_no_id_resp.get("data", [])
+            if len(rows) > 0:
+                best_count = 0
+                for row in rows:
+                    try:
+                        count = int(row[0])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                return [True, best_count, None]
+
+        # If table is missing, allow feature and start from zero.
+        message = str(monthly_resp.get("message", ""))
+        if "Table Not found" in message and "ai_summary_usage_table" in message:
             return [True, 0, None]
 
-        row_id = data[0][0]
-        try:
-            used_count = int(data[0][1])
-        except Exception:
-            used_count = 0
-        return [True, used_count, row_id]
+        # If monthly query failed due schema mismatch, try to continue with zero instead of hard-failing.
+        message_2 = str(monthly_resp.get("message", ""))
+        if "does not exist" in message_2 or "Unknown column" in message_2:
+            return [True, 0, None]
+
+        return [False, str(monthly_resp)]
+
+    def _try_usage_write(self, cols, where, values):
+        payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": cols,
+            "ops": "UPDATE" if where is not None else "INSERT",
+            "where": where,
+            "value": values
+        }
+        resp = db_execute(payload)
+        return bool(resp.get("status"))
 
     def _set_ai_summary_usage(self, phone, next_count, row_id=None):
         now_text = str(self.security_utils.get_datetime())
         month_key = self._summary_month_key()
+        next_count_text = str(next_count)
 
+        # 1) Try updates first (monthly + legacy variants).
+        update_attempts = []
         if row_id is not None:
-            payload = {
-                "db": "tenderwala",
-                "table": "ai_summary_usage_table",
-                "cols": ["used_count", "updated_on"],
-                "ops": "UPDATE",
-                "where": ["id"],
-                "value": [str(next_count), now_text, row_id]
-            }
-            resp = db_execute(payload)
-            if resp.get("status"):
+            update_attempts.extend([
+                (["used_count", "updated_on"], ["id"], [next_count_text, now_text, row_id]),
+                (["used_count"], ["id"], [next_count_text, row_id]),
+            ])
+
+        update_attempts.extend([
+            (["used_count", "updated_on"], ["phone", "month_key"], [next_count_text, now_text, phone, month_key]),
+            (["used_count"], ["phone", "month_key"], [next_count_text, phone, month_key]),
+            (["used_count", "updated_on"], ["phone"], [next_count_text, now_text, phone]),
+            (["used_count"], ["phone"], [next_count_text, phone]),
+        ])
+
+        for cols, where, values in update_attempts:
+            if self._try_usage_write(cols, where, values):
                 return True
 
-            fallback_payload = {
-                "db": "tenderwala",
-                "table": "ai_summary_usage_table",
-                "cols": ["used_count"],
-                "ops": "UPDATE",
-                "where": ["id"],
-                "value": [str(next_count), row_id]
-            }
-            fallback_resp = db_execute(fallback_payload)
-            if fallback_resp.get("status"):
+        # 2) If no row updated, try insert variants for both monthly and legacy schemas.
+        insert_attempts = [
+            (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
+            (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
+            (["phone", "used_count", "updated_on"], [phone, next_count_text, now_text]),
+            (["phone", "used_count"], [phone, next_count_text]),
+        ]
+        for cols, values in insert_attempts:
+            if self._try_usage_write(cols, None, values):
                 return True
 
-            update_by_phone_month = {
-                "db": "tenderwala",
-                "table": "ai_summary_usage_table",
-                "cols": ["used_count", "updated_on"],
-                "ops": "UPDATE",
-                "where": ["phone", "month_key"],
-                "value": [str(next_count), now_text, phone, month_key]
-            }
-            update_by_phone_month_resp = db_execute(update_by_phone_month)
-            if update_by_phone_month_resp.get("status"):
-                return True
-
-            fallback_update_by_phone_month = {
-                "db": "tenderwala",
-                "table": "ai_summary_usage_table",
-                "cols": ["used_count"],
-                "ops": "UPDATE",
-                "where": ["phone", "month_key"],
-                "value": [str(next_count), phone, month_key]
-            }
-            fallback_update_resp = db_execute(fallback_update_by_phone_month)
-            return bool(fallback_update_resp.get("status"))
-
-        insert_payload = {
-            "db": "tenderwala",
-            "table": "ai_summary_usage_table",
-            "cols": ["phone", "month_key", "used_count", "updated_on"],
-            "ops": "INSERT",
-            "where": None,
-            "value": [phone, month_key, str(next_count), now_text]
-        }
-        insert_resp = db_execute(insert_payload)
-        if insert_resp.get("status"):
+        # 3) Final retry update by phone in case insert failed due duplicate/constraint race.
+        if self._try_usage_write(["used_count"], ["phone"], [next_count_text, phone]):
+            return True
+        if self._try_usage_write(["used_count", "updated_on"], ["phone"], [next_count_text, now_text, phone]):
             return True
 
-        update_existing = {
-            "db": "tenderwala",
-            "table": "ai_summary_usage_table",
-            "cols": ["used_count", "updated_on"],
-            "ops": "UPDATE",
-            "where": ["phone", "month_key"],
-            "value": [str(next_count), now_text, phone, month_key]
-        }
-        update_existing_resp = db_execute(update_existing)
-        if update_existing_resp.get("status"):
-            return True
-
-        fallback_update_existing = {
-            "db": "tenderwala",
-            "table": "ai_summary_usage_table",
-            "cols": ["used_count"],
-            "ops": "UPDATE",
-            "where": ["phone", "month_key"],
-            "value": [str(next_count), phone, month_key]
-        }
-        fallback_update_existing_resp = db_execute(fallback_update_existing)
-        if fallback_update_existing_resp.get("status"):
-            return True
-
-        fallback_insert = {
-            "db": "tenderwala",
-            "table": "ai_summary_usage_table",
-            "cols": ["phone", "month_key", "used_count"],
-            "ops": "INSERT",
-            "where": None,
-            "value": [phone, month_key, str(next_count)]
-        }
-        fallback_resp = db_execute(fallback_insert)
-        return bool(fallback_resp.get("status"))
+        return False
 
     def _is_blankish(self, value):
         if value is None:
