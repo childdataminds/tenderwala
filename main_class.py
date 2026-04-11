@@ -1373,7 +1373,15 @@ Reply with Contact Us if you need assistance.
         if text == "":
             return "N/A"
 
-        amount_pattern = r"(?:rs\.?|pkr)\s*[:\-]?\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh))?"
+        amount_pattern = (
+            r"(?:"
+            r"(?:rs\.?|pkr|pak\s*rupees?)\s*[:\-]?\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?"
+            r"|"
+            r"[0-9]{1,2}(?:\.[0-9]{1,2})?\s*%"
+            r"|"
+            r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?"
+            r")"
+        )
         joined_kw = "|".join([re.escape(k) for k in keywords])
         if joined_kw == "":
             return "N/A"
@@ -1387,6 +1395,18 @@ Reply with Contact Us if you need assistance.
         m2 = re.search(reverse_pattern, text, flags=re.IGNORECASE)
         if m2:
             return m2.group(1).strip()
+
+        # Sentence-level fallback for cases like "Bid Security shall be 2%".
+        sentences = self._split_doc_sentences(text)
+        for sentence in sentences[:120]:
+            if self._is_noise_sentence(sentence):
+                continue
+            low = sentence.lower()
+            if not any(k in low for k in keywords):
+                continue
+            m3 = re.search(amount_pattern, sentence, flags=re.IGNORECASE)
+            if m3:
+                return m3.group(1).strip() if m3.lastindex else m3.group(0).strip()
         return "N/A"
 
     def _extract_rule_based_doc_insights(self, doc_text):
@@ -1497,9 +1517,31 @@ Reply with Contact Us if you need assistance.
             tender_meta = {}
 
         cleaned_doc_text = self._sanitize_doc_text_for_summary(doc_text)
+
+        cdr_hint = insights.get("cdr_amount", "N/A")
+        estimate_hint = insights.get("estimate_amount", "N/A")
+
+        if str(cdr_hint).strip().lower() == "n/a":
+            cdr_hint = self._extract_amount_by_keywords(
+                cleaned_doc_text,
+                ["cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"],
+                "Mentioned"
+            )
+
+        if str(estimate_hint).strip().lower() == "n/a":
+            estimate_hint = self._extract_amount_by_keywords(
+                cleaned_doc_text,
+                ["estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value", "estimated"],
+                "Mentioned"
+            )
+
+        meta_estimated_cost = tender_meta.get("estimated_cost")
+        if str(estimate_hint).strip().lower() == "n/a" and (not self._is_blankish(meta_estimated_cost)):
+            estimate_hint = str(meta_estimated_cost).strip()
+
         compact_payload = {
-            "cdr_amount": insights.get("cdr_amount", "N/A"),
-            "estimate_amount": insights.get("estimate_amount", "N/A"),
+            "cdr_amount": cdr_hint,
+            "estimate_amount": estimate_hint,
             "documents_required": insights.get("documents_required", [])[:4],
             "evaluation_criteria": insights.get("evaluation_criteria", [])[:4],
             "overall_points": insights.get("overall_points", [])[:5],
@@ -1548,6 +1590,9 @@ Reply with Contact Us if you need assistance.
                         "- Keep bullet lists short (max 4 items each)\n"
                         "- Do not include markdown headings or extra sections\n"
                         "- Do not copy website menu/footer text\n"
+                        "- Determine CDR Amount and Estimate Amount primarily from document text and metadata\n"
+                        "- CDR can be either currency value or percentage (example: 2%)\n"
+                        "- Use N/A only if value is truly not present in both document text and metadata\n"
                         f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=False)}\n"
                         f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=False)}\n"
                         f"Document text (cleaned): {cleaned_doc_text[:12000]}"
