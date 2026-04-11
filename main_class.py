@@ -11,7 +11,7 @@ import requests
 import tempfile
 import datetime
 import zipfile
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 from sindh_ppra import Sindh_Scrapper
 
 # Hardcoded OpenAI config.
@@ -972,6 +972,32 @@ Reply with Contact Us if you need assistance.
                         best_count = count
                 return [True, best_count, None]
 
+        # Broad fallback when where-clause columns differ across deployments.
+        phone_scan_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["phone", "used_count"],
+            "ops": "SELECT",
+            "where": None,
+            "value": None
+        }
+        phone_scan_resp = db_execute(phone_scan_payload)
+        if phone_scan_resp.get("status"):
+            best_count = None
+            for row in phone_scan_resp.get("data", []):
+                if len(row) < 2:
+                    continue
+                if str(row[0]).strip() != str(phone).strip():
+                    continue
+                try:
+                    count = int(row[1])
+                except Exception:
+                    count = 0
+                if best_count is None or count > best_count:
+                    best_count = count
+            if best_count is not None:
+                return [True, best_count, None]
+
         # If table is missing, allow feature and start from zero.
         message = str(monthly_resp.get("message", ""))
         if "Table Not found" in message and "ai_summary_usage_table" in message:
@@ -1001,6 +1027,19 @@ Reply with Contact Us if you need assistance.
         month_key = self._summary_month_key()
         next_count_text = str(next_count)
 
+        # Insert first when there is no known row id.
+        # UPDATE in current DB helper can return success even when 0 rows are affected.
+        if row_id is None:
+            insert_attempts = [
+                (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
+                (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
+                (["phone", "used_count", "updated_on"], [phone, next_count_text, now_text]),
+                (["phone", "used_count"], [phone, next_count_text]),
+            ]
+            for cols, values in insert_attempts:
+                if self._try_usage_write(cols, None, values):
+                    return True
+
         # 1) Try updates first (monthly + legacy variants).
         update_attempts = []
         if row_id is not None:
@@ -1020,14 +1059,14 @@ Reply with Contact Us if you need assistance.
             if self._try_usage_write(cols, where, values):
                 return True
 
-        # 2) If no row updated, try insert variants for both monthly and legacy schemas.
-        insert_attempts = [
+        # 2) Retry inserts for monthly/legacy schemas.
+        fallback_inserts = [
             (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
             (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
             (["phone", "used_count", "updated_on"], [phone, next_count_text, now_text]),
             (["phone", "used_count"], [phone, next_count_text]),
         ]
-        for cols, values in insert_attempts:
+        for cols, values in fallback_inserts:
             if self._try_usage_write(cols, None, values):
                 return True
 
@@ -1044,6 +1083,81 @@ Reply with Contact Us if you need assistance.
             return True
         text = str(value).strip().lower()
         return text in ["", "none", "null", "nan", "n/a"]
+
+    def _extract_download_link_from_html(self, base_url, html_text):
+        raw = str(html_text or "")
+        if raw.strip() == "":
+            return None
+
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(raw, "html.parser")
+            best = None
+            for anchor in soup.find_all("a"):
+                href = str(anchor.get("href") or "").strip()
+                if href == "":
+                    continue
+                full = urljoin(base_url, href)
+                label = anchor.get_text(" ", strip=True).lower()
+                href_low = full.lower()
+
+                if any(x in label for x in ["download tender document", "download bidding document", "download document"]):
+                    return full
+
+                if best is None and (
+                    href_low.endswith(".pdf")
+                    or href_low.endswith(".doc")
+                    or href_low.endswith(".docx")
+                    or "download" in label
+                    or "download" in href_low
+                ):
+                    best = full
+
+            if best is None:
+                for node in soup.find_all(attrs={"onclick": True}):
+                    onclick = str(node.get("onclick") or "")
+                    m = re.search(r"(?:window\.open|location\.href)\(['\"]([^'\"]+)['\"]\)", onclick, flags=re.IGNORECASE)
+                    if m:
+                        candidate = urljoin(base_url, m.group(1))
+                        cand_low = candidate.lower()
+                        if any(x in cand_low for x in [".pdf", ".doc", ".docx", "download", "tenderdoc", "bidding"]):
+                            return candidate
+
+            if best is None:
+                for attr_name in ["data-url", "data-href", "data-download"]:
+                    for node in soup.find_all(attrs={attr_name: True}):
+                        candidate = urljoin(base_url, str(node.get(attr_name) or "").strip())
+                        if candidate.strip() != "":
+                            cand_low = candidate.lower()
+                            if any(x in cand_low for x in [".pdf", ".doc", ".docx", "download", "tenderdoc", "bidding"]):
+                                return candidate
+            return best
+        except Exception:
+            m2 = re.search(r"(?:window\.open|location\.href)\(['\"]([^'\"]+)['\"]\)", raw, flags=re.IGNORECASE)
+            if m2:
+                return urljoin(base_url, m2.group(1))
+
+            m3 = re.search(r"https?://[^\s\"']+\.(?:pdf|docx?|rtf)(?:\?[^\s\"']*)?", raw, flags=re.IGNORECASE)
+            if m3:
+                return m3.group(0)
+
+            m = re.search(r"href\s*=\s*[\"']([^\"']+)[\"']", raw, flags=re.IGNORECASE)
+            if m:
+                return urljoin(base_url, m.group(1))
+            return None
+
+    def _http_get_for_docs(self, url, timeout=60):
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        return requests.get(url, timeout=timeout, headers=headers)
 
     def _is_noise_sentence(self, sentence):
         txt = str(sentence).strip()
@@ -1282,16 +1396,45 @@ Reply with Contact Us if you need assistance.
             return [False, "Invalid document URL", None, False]
 
         try:
-            resp = requests.get(url, timeout=60)
+            resp = self._http_get_for_docs(url, timeout=60)
         except Exception as e:
             return [False, f"Document download failed: {str(e)}", None, False]
 
         if resp.status_code != 200:
             return [False, f"Document URL returned status {resp.status_code}", None, False]
 
-        suffix = self._response_suffix_hint(url, resp)
+        final_url = url
+        final_resp = resp
+        for _ in range(2):
+            suffix_guess = self._response_suffix_hint(final_url, final_resp)
+            content_type = str(final_resp.headers.get("Content-Type", "")).lower()
+            is_html = (suffix_guess in [".html", ".htm", ".xml"]) or ("text/html" in content_type)
+            if not is_html:
+                break
+
+            try:
+                html_text = final_resp.content.decode("utf-8", errors="ignore")
+            except Exception:
+                html_text = ""
+
+            next_url = self._extract_download_link_from_html(final_url, html_text)
+            if next_url is None or str(next_url).strip() == "" or str(next_url).strip() == str(final_url).strip():
+                break
+
+            try:
+                next_resp = self._http_get_for_docs(next_url, timeout=60)
+            except Exception:
+                break
+
+            if next_resp.status_code != 200:
+                break
+
+            final_url = next_url
+            final_resp = next_resp
+
+        suffix = self._response_suffix_hint(final_url, final_resp)
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        tmp_file.write(resp.content)
+        tmp_file.write(final_resp.content)
         tmp_file.close()
         return [True, "", tmp_file.name, True]
 
