@@ -924,6 +924,32 @@ Reply with Contact Us if you need assistance.
                         best_count = count
                         best_row = row
                 return [True, best_count, best_row[0] if len(best_row) > 0 else None]
+        else:
+            # Fallback to avoid failing on schema mismatch for monthly query.
+            monthly_resp = {"status": False, "message": str(monthly_resp)}
+
+        # Fallback: query without id column for monthly tracking.
+        monthly_no_id_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["used_count"],
+            "ops": "SELECT",
+            "where": ["phone", "month_key"],
+            "value": [phone, month_key]
+        }
+        monthly_no_id_resp = db_execute(monthly_no_id_payload)
+        if monthly_no_id_resp.get("status"):
+            monthly_rows = monthly_no_id_resp.get("data", [])
+            if len(monthly_rows) > 0:
+                best_count = 0
+                for row in monthly_rows:
+                    try:
+                        count = int(row[0])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                return [True, best_count, None]
 
         # Legacy fallback: some deployments track a single counter per phone.
         legacy_with_id_payload = {
@@ -1030,6 +1056,13 @@ Reply with Contact Us if you need assistance.
         # Insert first when there is no known row id.
         # UPDATE in current DB helper can return success even when 0 rows are affected.
         if row_id is None:
+            # Explicit schema insert for the known table definition.
+            if self._try_usage_write(
+                ["phone", "month_key", "used_count", "updated_on"],
+                None,
+                [phone, month_key, next_count_text, now_text]
+            ):
+                return True
             insert_attempts = [
                 (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
                 (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
@@ -1792,15 +1825,17 @@ Reply with Contact Us if you need assistance.
             return [False, "invalid_input"]
 
         usage_resp = self._get_ai_summary_usage(phone)
+        usage_tracking = True
         if not usage_resp[0]:
-            self.api.send_message("AI Summary service is unavailable right now. Please try again later.")
-            return [False, usage_resp[1]]
-
-        used_count = usage_resp[1]
-        row_id = usage_resp[2]
-        if used_count >= 50:
-            self.api.send_message("Monthly AI Summary limit reached (50/50). Please try again next month.")
-            return [False, "limit_reached"]
+            # Usage lookup failed; continue with a fresh counter and attempt to write later.
+            used_count = 0
+            row_id = None
+        else:
+            used_count = usage_resp[1]
+            row_id = usage_resp[2]
+            if used_count >= 50:
+                self.api.send_message("Monthly AI Summary limit reached (50/50). Please try again next month.")
+                return [False, "limit_reached"]
 
         tender_cols = [
             "document",
