@@ -122,7 +122,7 @@ Reply with Contact Us if you need assistance.
 
         self.api.send_btn_msg(
             txt,
-            ["Free Demo","Change Language!","Contact Us"]
+            ["Free Demo","Change Language!", 'Change Settings',"Contact Us"]
         )
     def _registration_input_help(self, invalid_value=None):
         if self.lang.type == "ur":
@@ -194,7 +194,7 @@ Reply with Contact Us if you need assistance.
                 if next_step is not None:
                         self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/{next_col}.png",next_step)
                 else:
-                        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Contact Us","Change Language!"])
+                        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Contact Us","Change Language!", 'Change Settings'])
                         resp = self.api.utils.update_user_status(self.api.sender,"TRIAL")
             else:
                 self.api.send_btn_msg(next_step,["All","Contact Us","Change Language!"],["types",0,1])
@@ -211,7 +211,7 @@ Reply with Contact Us if you need assistance.
     def benefits(self):
         self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/benefits.png","")
     def trial_user_func(self):
-        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Benefits","Change Language!"])
+        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Benefits","Change Language!",'Change Settings'])
 
     def _set_runtime_language(self, lang_code):
         code = str(lang_code).strip().lower()
@@ -253,7 +253,7 @@ Reply with Contact Us if you need assistance.
     def _resend_registration_step(self):
         filters_resp = self.api.utils.get_filters(self.api.sender)
         if not filters_resp[0]:
-            self.api.send_btn_msg(self.lang.ask_prov,["All Regions","Contact Us","Change Language!"],["provinces",0,1])
+            self.api.send_btn_msg(self.lang.ask_prov,["All Regions","Contact Us","Change Language!", 'Change Settings'],["provinces",0,1])
             return True
 
         filter_data = filters_resp[1]
@@ -270,7 +270,7 @@ Reply with Contact Us if you need assistance.
             completed += 1
 
         if completed == 0:
-            self.api.send_btn_msg(self.lang.ask_types,["All Types","Contact Us","Change Language!"],["types",0,1])
+            self.api.send_btn_msg(self.lang.ask_types,["All Types","Contact Us","Change Language!", 'Change Settings'],["types",0,1])
             return True
 
         if is_prov_cities:
@@ -754,7 +754,7 @@ Reply with Contact Us if you need assistance.
             resp = self.api.utils.insert_into_filters(self.api.sender,col,"all",self.available)
             
             self.api.send_message(self.lang.province_success)
-            self.api.send_btn_msg(step_msg,["All Types","Contact Us","Change Language!"],[next_col,0,1])
+            self.api.send_btn_msg(step_msg,["All Types","Contact Us","Change Language!", 'Change Settings'],[next_col,0,1])
         
         else:
             self.is_prov_cities = True
