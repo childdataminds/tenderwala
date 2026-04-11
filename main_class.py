@@ -351,6 +351,36 @@ Reply with Contact Us if you need assistance.
             "all_btn_id": "categories",
         }
 
+    def _send_settings_city_prompt(self, city_col, city_name):
+        step_msg = self.lang.choose_from_img(city_name)
+        self.api.send_document_msg_by_url(
+            "image",
+            f"{self.img_url}{city_col}.png",
+            step_msg
+        )
+
+    def _start_settings_city_flow(self):
+        filters_resp = self.api.utils.get_filters(self.api.sender)
+        if not filters_resp[0]:
+            return False
+
+        filter_data = filters_resp[1]
+        name, col, _, _ = self.security_utils.cities_selection_logic(
+            filter_data,
+            self.lang.province,
+            self.filters_list[1:]
+        )
+        if name is None or col is None:
+            return False
+
+        self.settings_edit_context[self.api.sender] = {
+            "col": "provinces",
+            "mode": "cities",
+            "city_col": col[0]
+        }
+        self._send_settings_city_prompt(col[0], name[0])
+        return True
+
     def change_settings_func(self):
         self._ensure_settings_context()
         self.settings_edit_context[self.api.sender] = {"col": None}
@@ -409,6 +439,45 @@ Reply with Contact Us if you need assistance.
         if selected_col is None:
             return False
 
+        if ctx.get("mode") == "cities":
+            city_col = ctx.get("city_col")
+            if not city_col:
+                return False
+            input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[city_col]["list"])
+            if input_resp[0]:
+                resp = self.api.utils.insert_into_filters(self.api.sender, city_col, msg_text, True)
+                if not resp.get("status"):
+                    resp = self.api.utils.insert_into_filters(self.api.sender, city_col, msg_text, False)
+
+                if resp.get("status"):
+                    filters_resp = self.api.utils.get_filters(self.api.sender)
+                    if filters_resp[0]:
+                        filter_data = filters_resp[1]
+                        name, col, _, _ = self.security_utils.cities_selection_logic(
+                            filter_data,
+                            self.lang.province,
+                            self.filters_list[1:]
+                        )
+                        if name is not None and col is not None:
+                            ctx["city_col"] = col[0]
+                            self._send_settings_city_prompt(col[0], name[0])
+                            return True
+
+                    self.api.send_message(self.lang.province_success)
+                    self.api.send_message("Setting updated successfully.")
+                    self.settings_edit_context.pop(self.api.sender, None)
+                    return True
+
+                self.api.send_message("Unable to update setting right now. Please try again.")
+                return True
+
+            if input_resp[1] is None:
+                self.api.send_message(self.lang.keep_registering)
+            else:
+                self.api.send_message(self.lang.province_error + " " + str(input_resp[1]))
+            self._send_settings_city_prompt(city_col, prov_cities[city_col]["name"])
+            return True
+
         info = self._settings_target_info(selected_col)
         input_resp = self.security_utils.get_numbers_list(msg_text, info["items"])
 
@@ -418,6 +487,14 @@ Reply with Contact Us if you need assistance.
                 resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, msg_text, False)
 
             if resp.get("status"):
+                if selected_col == "provinces":
+                    self.api.send_message(self.lang.province_success)
+                    if self._start_settings_city_flow():
+                        return True
+                    self.api.send_message("Setting updated successfully.")
+                    self.settings_edit_context.pop(self.api.sender, None)
+                    return True
+
                 self.api.send_message(self.lang.province_success)
                 self.api.send_message("Setting updated successfully.")
                 self.settings_edit_context.pop(self.api.sender, None)
@@ -456,6 +533,14 @@ Reply with Contact Us if you need assistance.
             resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, "all", False)
 
         if resp.get("status"):
+            if selected_col == "provinces":
+                self.api.send_message(self.lang.province_success)
+                if self._start_settings_city_flow():
+                    return True
+                self.api.send_message("Setting updated successfully.")
+                self.settings_edit_context.pop(self.api.sender, None)
+                return True
+
             self.api.send_message(self.lang.province_success)
             self.api.send_message("Setting updated successfully.")
         else:
