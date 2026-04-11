@@ -211,7 +211,7 @@ Reply with Contact Us if you need assistance.
     def benefits(self):
         self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/benefits.png","")
     def trial_user_func(self):
-        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Benefits","Change Language!"])
+        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Benefits","Change Settings","Change Language!"])
 
     def _set_runtime_language(self, lang_code):
         code = str(lang_code).strip().lower()
@@ -304,10 +304,10 @@ Reply with Contact Us if you need assistance.
             self.visitor_user_func()
             return True
         if user_type == "PAID":
-            self.api.send_btn_msg(self.paid_user_func(), ["Change Language!"])
+            self.api.send_btn_msg(self.paid_user_func(), ["Change Settings", "Change Language!"])
             return True
         if user_type == "UNPAID":
-            self.api.send_btn_msg(self.unpaid_user_func(), ["Change Language!"])
+            self.api.send_btn_msg(self.unpaid_user_func(), ["Change Settings", "Change Language!"])
             return True
         return False
 
