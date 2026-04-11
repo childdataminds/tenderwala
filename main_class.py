@@ -951,7 +951,31 @@ Reply with Contact Us if you need assistance.
                 "value": [str(next_count), row_id]
             }
             fallback_resp = db_execute(fallback_payload)
-            return bool(fallback_resp.get("status"))
+            if fallback_resp.get("status"):
+                return True
+
+            update_by_phone_month = {
+                "db": "tenderwala",
+                "table": "ai_summary_usage_table",
+                "cols": ["used_count", "updated_on"],
+                "ops": "UPDATE",
+                "where": ["phone", "month_key"],
+                "value": [str(next_count), now_text, phone, month_key]
+            }
+            update_by_phone_month_resp = db_execute(update_by_phone_month)
+            if update_by_phone_month_resp.get("status"):
+                return True
+
+            fallback_update_by_phone_month = {
+                "db": "tenderwala",
+                "table": "ai_summary_usage_table",
+                "cols": ["used_count"],
+                "ops": "UPDATE",
+                "where": ["phone", "month_key"],
+                "value": [str(next_count), phone, month_key]
+            }
+            fallback_update_resp = db_execute(fallback_update_by_phone_month)
+            return bool(fallback_update_resp.get("status"))
 
         insert_payload = {
             "db": "tenderwala",
@@ -963,6 +987,30 @@ Reply with Contact Us if you need assistance.
         }
         insert_resp = db_execute(insert_payload)
         if insert_resp.get("status"):
+            return True
+
+        update_existing = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["used_count", "updated_on"],
+            "ops": "UPDATE",
+            "where": ["phone", "month_key"],
+            "value": [str(next_count), now_text, phone, month_key]
+        }
+        update_existing_resp = db_execute(update_existing)
+        if update_existing_resp.get("status"):
+            return True
+
+        fallback_update_existing = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["used_count"],
+            "ops": "UPDATE",
+            "where": ["phone", "month_key"],
+            "value": [str(next_count), phone, month_key]
+        }
+        fallback_update_existing_resp = db_execute(fallback_update_existing)
+        if fallback_update_existing_resp.get("status"):
             return True
 
         fallback_insert = {
@@ -981,6 +1029,50 @@ Reply with Contact Us if you need assistance.
             return True
         text = str(value).strip().lower()
         return text in ["", "none", "null", "nan", "n/a"]
+
+    def _is_noise_sentence(self, sentence):
+        txt = str(sentence).strip()
+        if txt == "":
+            return True
+
+        low = txt.lower()
+        if "<" in txt or "{" in txt or "}" in txt:
+            return True
+
+        noise_markers = [
+            "home tenders",
+            "active tenders",
+            "tenders history",
+            "evaluation results",
+            "contracts grievances",
+            "blacklisted firms",
+            "copyright",
+            "no-js",
+            "navbar",
+            "position-sticky",
+            "viewport",
+            "public procurement regulatory authority",
+        ]
+        procurement_markers = [
+            "tender",
+            "bid",
+            "security",
+            "estimate",
+            "submission",
+            "technical",
+            "financial",
+            "qualification",
+            "document",
+            "emd",
+            "cdr",
+        ]
+
+        if any(marker in low for marker in noise_markers) and (not any(marker in low for marker in procurement_markers)):
+            return True
+
+        if len(re.findall(r"[a-zA-Z]", txt)) < 8:
+            return True
+        return False
 
     def _response_suffix_hint(self, url, resp):
         known_exts = [".pdf", ".doc", ".docx", ".docm", ".rtf", ".txt", ".html", ".htm", ".xml"]
@@ -1070,11 +1162,55 @@ Reply with Contact Us if you need assistance.
         except Exception:
             return ""
 
-        html_text = re.sub(r"<script[\s\S]*?</script>", " ", html_text, flags=re.IGNORECASE)
-        html_text = re.sub(r"<style[\s\S]*?</style>", " ", html_text, flags=re.IGNORECASE)
-        html_text = re.sub(r"<[^>]+>", " ", html_text)
-        html_text = re.sub(r"\s+", " ", html_text).strip()
-        return html_text
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html_text, "html.parser")
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            for tag_name in ["nav", "header", "footer", "aside"]:
+                for node in soup.find_all(tag_name):
+                    node.decompose()
+
+            text = soup.get_text(separator=" ", strip=True)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+        except Exception:
+            html_text = re.sub(r"<script[\s\S]*?</script>", " ", html_text, flags=re.IGNORECASE)
+            html_text = re.sub(r"<style[\s\S]*?</style>", " ", html_text, flags=re.IGNORECASE)
+            html_text = re.sub(r"<[^>]+>", " ", html_text)
+            html_text = re.sub(r"\s+", " ", html_text).strip()
+            return html_text
+
+    def _sanitize_doc_text_for_summary(self, doc_text):
+        text = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if text == "":
+            return ""
+
+        junk_phrases = [
+            "home tenders active tenders",
+            "tenders history",
+            "evaluation results",
+            "contracts grievances",
+            "job advertisements",
+            "blacklisted firms",
+            "public procurement regulatory authority",
+        ]
+        for phrase in junk_phrases:
+            text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
+
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?;])\s+", text) if s.strip() != ""]
+        kept = []
+        for sentence in sentences:
+            if len(sentence) < 20:
+                continue
+            if self._is_noise_sentence(sentence):
+                continue
+            kept.append(sentence)
+
+        if len(kept) == 0:
+            return text[:7000]
+        return " ".join(kept[:90])[:12000]
 
     def _enrich_insights_with_tender_meta(self, insights, tender_meta):
         merged = {
@@ -1217,6 +1353,8 @@ Reply with Contact Us if you need assistance.
         results = []
         seen = set()
         for sentence in sentences:
+            if self._is_noise_sentence(sentence):
+                continue
             if len(sentence) < min_len:
                 continue
             low = sentence.lower()
@@ -1249,11 +1387,6 @@ Reply with Contact Us if you need assistance.
         m2 = re.search(reverse_pattern, text, flags=re.IGNORECASE)
         if m2:
             return m2.group(1).strip()
-
-        sentences = self._split_doc_sentences(text)
-        fallback_sentences = self._pick_keyword_sentences(sentences, keywords, limit=1, min_len=20, max_len=170)
-        if len(fallback_sentences) > 0:
-            return f"{fallback_label}: {fallback_sentences[0]}"
         return "N/A"
 
     def _extract_rule_based_doc_insights(self, doc_text):
@@ -1307,7 +1440,11 @@ Reply with Contact Us if you need assistance.
         )
 
         if len(overall_points) == 0 and len(sentences) > 0:
-            overall_points = [s[:210] for s in sentences[:4] if len(s.strip()) > 20]
+            overall_points = [
+                s[:210]
+                for s in sentences[:25]
+                if len(s.strip()) > 20 and (not self._is_noise_sentence(s))
+            ][:4]
 
         return {
             "cdr_amount": cdr_amount,
@@ -1352,16 +1489,29 @@ Reply with Contact Us if you need assistance.
 
         return "\n".join(lines)
 
-    def _build_ai_quick_summary(self, insights):
+    def _build_ai_quick_summary(self, insights, doc_text="", tender_meta=None):
         openai_key, model = self._openai_config()
         if openai_key == "":
             return [False, "missing_openai_key", ""]
+        if tender_meta is None:
+            tender_meta = {}
+
+        cleaned_doc_text = self._sanitize_doc_text_for_summary(doc_text)
         compact_payload = {
             "cdr_amount": insights.get("cdr_amount", "N/A"),
             "estimate_amount": insights.get("estimate_amount", "N/A"),
             "documents_required": insights.get("documents_required", [])[:4],
             "evaluation_criteria": insights.get("evaluation_criteria", [])[:4],
             "overall_points": insights.get("overall_points", [])[:5],
+        }
+        meta_payload = {
+            "title": tender_meta.get("title", "N/A"),
+            "department": tender_meta.get("department", "N/A"),
+            "city": tender_meta.get("city", "N/A"),
+            "category": tender_meta.get("category", "N/A"),
+            "date_opening": tender_meta.get("date_opening", "N/A"),
+            "date_published": tender_meta.get("date_published", "N/A"),
+            "estimated_cost": tender_meta.get("estimated_cost", "N/A"),
         }
 
         payload = {
@@ -1370,9 +1520,10 @@ Reply with Contact Us if you need assistance.
                 {
                     "role": "system",
                     "content": (
-                        "You are a tender assistant for WhatsApp users. "
-                        "Generate a concise practical summary from extracted document facts only. "
-                        "If any detail is unavailable, write N/A."
+                        "You are an expert procurement assistant for WhatsApp users. "
+                        "Generate a clean, practical tender summary from provided data. "
+                        "Ignore website navigation/footer boilerplate and malformed HTML fragments. "
+                        "If a detail is not available, write N/A."
                     ),
                 },
                 {
@@ -1392,17 +1543,19 @@ Reply with Contact Us if you need assistance.
                         "- ...\n"
                         "- ...\n"
                         "\n"
-                        "Rules:\n"
-                        "- Use only provided extracted document facts\n"
+                        "Guidelines:\n"
                         "- Keep response compact for WhatsApp\n"
                         "- Keep bullet lists short (max 4 items each)\n"
                         "- Do not include markdown headings or extra sections\n"
-                        f"Extracted facts JSON: {json.dumps(compact_payload, ensure_ascii=False)}"
+                        "- Do not copy website menu/footer text\n"
+                        f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=False)}\n"
+                        f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=False)}\n"
+                        f"Document text (cleaned): {cleaned_doc_text[:12000]}"
                     ),
                 },
             ],
             "temperature": 0.2,
-            "max_tokens": 320,
+            "max_tokens": 420,
         }
         headers = {
             "Authorization": f"Bearer {openai_key}",
@@ -1511,7 +1664,7 @@ Reply with Contact Us if you need assistance.
             doc_text = self._extract_doc_text(local_path)
             insights = self._extract_rule_based_doc_insights(doc_text)
             insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
-            ai_resp = self._build_ai_quick_summary(insights)
+            ai_resp = self._build_ai_quick_summary(insights, doc_text=doc_text, tender_meta=tender_meta)
             if ai_resp[0]:
                 summary_text = ai_resp[2]
             else:
