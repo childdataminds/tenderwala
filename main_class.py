@@ -140,74 +140,106 @@ Reply with Contact Us if you need assistance.
             return "I could not understand your input. Please send valid serial numbers (example: 1,3) or type ALL."
         return f"Invalid value: {invalid_value}. Please send valid serial numbers (example: 1,3) or type ALL."
 
-    def registering_user(self,msg_text):
-        
+    def _is_filter_value_set(self, value):
+        if value is None:
+            return False
+        text = str(value).strip().lower()
+        return text not in ["", "empty", "none", "null"]
+
+    def _send_registration_next_step_from_filter(self, filter_data):
+        name, col, _, _ = self.security_utils.cities_selection_logic(
+            filter_data,
+            self.lang.province,
+            self.filters_list[1:]
+        )
+
+        if name is not None and col is not None:
+            col_name = col[0]
+            step_msg = self.lang.choose_from_img(name[0])
+            if col_name == "categories":
+                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
+            else:
+                self.api.send_document_msg_by_url("image", f"{self.img_url}{col_name}.png", step_msg)
+            return True
+
+        if not self._is_filter_value_set(filter_data[2]):
+            self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+            return True
+
+        return False
+
+    def _send_registration_next_step(self):
         filters_resp = self.api.utils.get_filters(self.api.sender)
-        
-        if filters_resp[0]:
-            filter_data = filters_resp[1]
-            # Removing those steps whose value is already filled in database
-            c = 0
-            
-            for step in filter_data[2:]:
-                if c > 0:
-                    self.is_prov_cities = True
-                if step is None:
-                    break
-                step_text = str(step).strip().lower()
-                if step_text == "" or step_text == "empty":
-                    break
-                c += 1
-            if c == 0:
-                col = "types"
-                input_resp = self.security_utils.get_numbers_list(msg_text,types)
-                step_msg = self.lang.ask_types
-                name,next_col,_,_ = self.security_utils.cities_selection_logic(filter_data,self.lang.province,self.filters_list[1:])
-                
-                next_step = self.lang.choose_from_img(name[0])
-            if self.is_prov_cities:
-                    name,col,next_step,next_col = self.security_utils.cities_selection_logic(filter_data,self.lang.province,self.filters_list[1:])
-                    if name == None:
-                        name = ["Catogaries"]
-                        col = ["categories"]
-                        
-                    
-            
-                    col = col[0]
-                    input_resp = self.security_utils.get_numbers_list(msg_text,prov_cities[col]["list"])
-                    step_msg = self.lang.choose_from_img(name[0])
-                    if next_step != None:
-                        
-                        next_step = self.lang.choose_from_img(next_step)
-            
-                
-        else:
-            step_msg = self.lang.ask_prov
-            next_step = self.lang.ask_types
+        if not filters_resp[0]:
+            self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
+            return False
+        return self._send_registration_next_step_from_filter(filters_resp[1])
+
+    def registering_user(self,msg_text):
+        filters_resp = self.api.utils.get_filters(self.api.sender)
+
+        if not filters_resp[0]:
             col = "provinces"
-            input_resp = self.security_utils.get_numbers_list(msg_text,province)
-            self.available = False
-        
-        if input_resp[0]:
-            resp = self.api.utils.insert_into_filters(self.api.sender,col,msg_text,self.available)
-            self.api.send_message(self.lang.province_success)
-            if self.is_prov_cities:
-                if next_step is not None:
-                        self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/{next_col}.png",next_step)
+            input_resp = self.security_utils.get_numbers_list(msg_text, province)
+            if input_resp[0]:
+                resp = self.api.utils.insert_into_filters(self.api.sender, col, msg_text, False)
+                if resp.get("status"):
+                    self.api.send_message(self.lang.province_success)
+                    if not self._send_registration_next_step():
+                        self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
                 else:
-                        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Contact Us","Change Language!"])
-                        resp = self.api.utils.update_user_status(self.api.sender,"TRIAL")
-            else:
-                self.api.send_btn_msg(next_step,["All","Contact Us","Change Language!"],["types",0,1])
-        else:
-            invalid_value = None
-            if input_resp[1] is not None:
-                invalid_value = str(input_resp[1])
+                    self.api.send_message("Unable to save your region right now. Please try again.")
+                return
+
+            invalid_value = None if input_resp[1] is None else str(input_resp[1])
             self.api.send_message(self._registration_input_help(invalid_value))
-            if self.is_prov_cities:
-                    self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/{col}.png",step_msg)
+            self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
+            return
+
+        filter_data = filters_resp[1]
+        name, col, _, _ = self.security_utils.cities_selection_logic(filter_data, self.lang.province, self.filters_list[1:])
+
+        if name is not None and col is not None:
+            target_col = col[0]
+            input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[target_col]["list"])
+            if input_resp[0]:
+                resp = self.api.utils.insert_into_filters(self.api.sender, target_col, msg_text, True)
+                if not resp.get("status"):
+                    resp = self.api.utils.insert_into_filters(self.api.sender, target_col, msg_text, False)
+
+                if resp.get("status"):
+                    self.api.send_message(self.lang.province_success)
+                    self._send_registration_next_step()
+                else:
+                    self.api.send_message("Unable to save your selection right now. Please try again.")
+                return
+
+            invalid_value = None if input_resp[1] is None else str(input_resp[1])
+            self.api.send_message(self._registration_input_help(invalid_value))
+            step_msg = self.lang.choose_from_img(name[0])
+            if target_col == "categories":
+                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
             else:
-                    self.api.send_btn_msg(step_msg,["All","Contact Us","Change Language!"],[col,0,1])
+                self.api.send_document_msg_by_url("image", f"{self.img_url}{target_col}.png", step_msg)
+            return
+
+        input_resp = self.security_utils.get_numbers_list(msg_text, types)
+        if input_resp[0]:
+            resp = self.api.utils.insert_into_filters(self.api.sender, "types", msg_text, True)
+            if not resp.get("status"):
+                resp = self.api.utils.insert_into_filters(self.api.sender, "types", msg_text, False)
+
+            if resp.get("status"):
+                self.api.send_message(self.lang.province_success)
+                self.api.send_btn_msg(self.lang.register_success, ["Send Tenders", "Contact Us", "Change Language!"])
+                self.api.utils.update_user_status(self.api.sender, "TRIAL")
+            else:
+                self.api.send_message("Unable to save contract type right now. Please try again.")
+            return
+
+        invalid_value = None if input_resp[1] is None else str(input_resp[1])
+        self.api.send_message(self._registration_input_help(invalid_value))
+        self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
     
     def benefits(self):
         self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/benefits.png","")
@@ -258,37 +290,10 @@ Reply with Contact Us if you need assistance.
             return True
 
         filter_data = filters_resp[1]
-        completed = 0
-        is_prov_cities = False
-        for step in filter_data[2:]:
-            if completed > 0:
-                is_prov_cities = True
-            if step is None:
-                break
-            step_text = str(step).strip().lower()
-            if step_text == "" or step_text == "empty":
-                break
-            completed += 1
-
-        if completed == 0:
-            self.api.send_btn_msg(self.lang.ask_types,["All Types","Contact Us","Change Language!"],["types",0,1])
+        if self._send_registration_next_step_from_filter(filter_data):
             return True
 
-        if is_prov_cities:
-            name, col, _, _ = self.security_utils.cities_selection_logic(filter_data, self.lang.province, self.filters_list[1:])
-            if name is None:
-                name = ["Categories"]
-                col = ["categories"]
-
-            col_name = col[0]
-            step_msg = self.lang.choose_from_img(name[0])
-            if col_name == "categories":
-                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
-            else:
-                self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/{col_name}.png",step_msg)
-            return True
-
-        self.api.send_btn_msg(self.lang.ask_prov,["All Regions","Contact Us","Change Language!"],["provinces",0,1])
+        self.api.send_btn_msg(self.lang.register_success, ["Send Tenders", "Contact Us", "Change Language!"])
         return True
 
     def resend_previous_step(self):
@@ -465,8 +470,9 @@ Reply with Contact Us if you need assistance.
                             return True
 
                     self.api.send_message(self.lang.province_success)
-                    self.api.send_message("Setting updated successfully.")
-                    self.settings_edit_context.pop(self.api.sender, None)
+                    ctx["mode"] = None
+                    ctx["col"] = "types"
+                    self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
                     return True
 
                 self.api.send_message("Unable to update setting right now. Please try again.")
@@ -492,8 +498,8 @@ Reply with Contact Us if you need assistance.
                     self.api.send_message(self.lang.province_success)
                     if self._start_settings_city_flow():
                         return True
-                    self.api.send_message("Setting updated successfully.")
-                    self.settings_edit_context.pop(self.api.sender, None)
+                    ctx["col"] = "types"
+                    self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
                     return True
 
                 self.api.send_message(self.lang.province_success)
@@ -538,8 +544,8 @@ Reply with Contact Us if you need assistance.
                 self.api.send_message(self.lang.province_success)
                 if self._start_settings_city_flow():
                     return True
-                self.api.send_message("Setting updated successfully.")
-                self.settings_edit_context.pop(self.api.sender, None)
+                ctx["col"] = "types"
+                self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
                 return True
 
             self.api.send_message(self.lang.province_success)
@@ -745,23 +751,38 @@ Reply with Contact Us if you need assistance.
 
     def register_step_btn_resp(self,button_id):
         col = button_id
-                        
-        self.is_prov_cities = False
+        
         if col == "provinces":
-            self.available = False
-            step_msg = self.lang.ask_types
-            next_col = "types"
-        
-            resp = self.api.utils.insert_into_filters(self.api.sender,col,"all",self.available)
-            
+            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
+            if resp.get("status"):
+                self.api.send_message(self.lang.province_success)
+                self._send_registration_next_step()
+            else:
+                self.api.send_message("Unable to save your region right now. Please try again.")
+            return
+
+        if col == "types":
+            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", True)
+            if not resp.get("status"):
+                resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
+
+            if resp.get("status"):
+                self.api.send_message(self.lang.province_success)
+                self.api.send_btn_msg(self.lang.register_success, ["Send Tenders", "Contact Us", "Change Language!"])
+                self.api.utils.update_user_status(self.api.sender, "TRIAL")
+            else:
+                self.api.send_message("Unable to save contract type right now. Please try again.")
+            return
+
+        resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", True)
+        if not resp.get("status"):
+            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
+
+        if resp.get("status"):
             self.api.send_message(self.lang.province_success)
-            self.api.send_btn_msg(step_msg,["All Types","Contact Us","Change Language!"],[next_col,0,1])
-        
+            self._send_registration_next_step()
         else:
-            self.is_prov_cities = True
-            resp = self.api.utils.insert_into_filters(self.api.sender,col,"all",True)
-            self.api.send_message(self.lang.province_success)
-            self.registering_user("hi")
+            self.api.send_message("Unable to save your selection right now. Please try again.")
     def send_tenders(self,cron=False,old=False,old_table = []):
         
         if not cron:
