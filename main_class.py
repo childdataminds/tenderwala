@@ -11,6 +11,7 @@ import requests
 import tempfile
 import datetime
 import zipfile
+from uuid import uuid4
 from urllib.parse import unquote, urljoin
 from sindh_ppra import Sindh_Scrapper
 
@@ -1052,22 +1053,23 @@ Reply with Contact Us if you need assistance.
         now_text = str(self.security_utils.get_datetime())
         month_key = self._summary_month_key()
         next_count_text = str(next_count)
+        generated_id = f"{month_key}:{str(phone).strip()}:{uuid4().hex}"
 
         # Insert first when there is no known row id.
         # UPDATE in current DB helper can return success even when 0 rows are affected.
         if row_id is None:
             # Explicit schema insert for the known table definition.
             if self._try_usage_write(
-                ["phone", "month_key", "used_count", "updated_on"],
+                ["id", "phone", "month_key", "used_count", "updated_on"],
                 None,
-                [phone, month_key, next_count_text, now_text]
+                [generated_id, phone, month_key, next_count_text, now_text]
             ):
                 return True
             insert_attempts = [
-                (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
-                (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
-                (["phone", "used_count", "updated_on"], [phone, next_count_text, now_text]),
-                (["phone", "used_count"], [phone, next_count_text]),
+                (["id", "phone", "month_key", "used_count", "updated_on"], [generated_id, phone, month_key, next_count_text, now_text]),
+                (["id", "phone", "month_key", "used_count"], [generated_id, phone, month_key, next_count_text]),
+                (["id", "phone", "used_count", "updated_on"], [generated_id, phone, next_count_text, now_text]),
+                (["id", "phone", "used_count"], [generated_id, phone, next_count_text]),
             ]
             for cols, values in insert_attempts:
                 if self._try_usage_write(cols, None, values):
@@ -1094,10 +1096,10 @@ Reply with Contact Us if you need assistance.
 
         # 2) Retry inserts for monthly/legacy schemas.
         fallback_inserts = [
-            (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
-            (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
-            (["phone", "used_count", "updated_on"], [phone, next_count_text, now_text]),
-            (["phone", "used_count"], [phone, next_count_text]),
+            (["id", "phone", "month_key", "used_count", "updated_on"], [generated_id, phone, month_key, next_count_text, now_text]),
+            (["id", "phone", "month_key", "used_count"], [generated_id, phone, month_key, next_count_text]),
+            (["id", "phone", "used_count", "updated_on"], [generated_id, phone, next_count_text, now_text]),
+            (["id", "phone", "used_count"], [generated_id, phone, next_count_text]),
         ]
         for cols, values in fallback_inserts:
             if self._try_usage_write(cols, None, values):
@@ -1666,6 +1668,97 @@ Reply with Contact Us if you need assistance.
             "text_length": len(str(doc_text)),
         }
 
+    def _na_or_empty(self, value):
+        if value is None:
+            return True
+        text = str(value).strip().lower()
+        return text in ["", "n/a", "none", "null"]
+
+    def _fill_na_insights_with_ai(self, insights, doc_text, tender_meta):
+        openai_key, model = self._openai_config()
+        if openai_key == "":
+            return insights
+
+        needs_fill = (
+            self._na_or_empty(insights.get("cdr_amount"))
+            or self._na_or_empty(insights.get("estimate_amount"))
+            or len(insights.get("documents_required", [])) == 0
+            or len(insights.get("evaluation_criteria", [])) == 0
+        )
+        if not needs_fill:
+            return insights
+
+        compact_doc = self._sanitize_doc_text_for_summary(doc_text)[:10000]
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract structured tender facts from text. "
+                        "Return strict JSON only. Use N/A only when truly unavailable."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Return ONLY valid JSON with keys: "
+                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_points. "
+                        "documents_required/evaluation_criteria/overall_points must be arrays of short strings. "
+                        f"Tender metadata: {json.dumps(tender_meta, ensure_ascii=False)}\n"
+                        f"Current extracted hints: {json.dumps(insights, ensure_ascii=False)}\n"
+                        f"Document text: {compact_doc}"
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "max_tokens": 420,
+        }
+        headers = {
+            "Authorization": f"Bearer {openai_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                return insights
+
+            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if content == "":
+                return insights
+
+            start = content.find("{")
+            end = content.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return insights
+
+            parsed = json.loads(content[start:end + 1])
+            merged = dict(insights)
+
+            if self._na_or_empty(merged.get("cdr_amount")) and (not self._na_or_empty(parsed.get("cdr_amount"))):
+                merged["cdr_amount"] = str(parsed.get("cdr_amount")).strip()
+            if self._na_or_empty(merged.get("estimate_amount")) and (not self._na_or_empty(parsed.get("estimate_amount"))):
+                merged["estimate_amount"] = str(parsed.get("estimate_amount")).strip()
+
+            for key in ["documents_required", "evaluation_criteria", "overall_points"]:
+                current = merged.get(key, [])
+                if not isinstance(current, list):
+                    current = []
+                if len(current) == 0:
+                    candidate = parsed.get(key, [])
+                    if isinstance(candidate, list):
+                        merged[key] = [str(x).strip() for x in candidate if str(x).strip() != ""][:5]
+
+            return merged
+        except Exception:
+            return insights
+
     def _build_rule_based_summary(self, insights):
         docs = insights.get("documents_required", [])
         evals = insights.get("evaluation_criteria", [])
@@ -1902,6 +1995,7 @@ Reply with Contact Us if you need assistance.
             doc_text = self._extract_doc_text(local_path)
             insights = self._extract_rule_based_doc_insights(doc_text)
             insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
+            insights = self._fill_na_insights_with_ai(insights, doc_text, tender_meta)
             ai_resp = self._build_ai_quick_summary(insights, doc_text=doc_text, tender_meta=tender_meta)
             if ai_resp[0]:
                 summary_text = ai_resp[2]
