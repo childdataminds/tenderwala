@@ -5,7 +5,10 @@ class ScrapingUtils:
     
     def convert_iso_datetime(self,iso_date):
         dt = datetime.datetime.fromisoformat(iso_date)
-        return str(dt.strftime("%Y-%m-%d %H:%M:%S"))
+        try:
+           dt = str(dt.strftime("%Y-%m-%d %H:%M:%S"))
+        except:
+            dt = str(dt.strftime("%Y-%m-%dT%H:%M:%S.%f"))
     def get_datetime(self):
         date_str = datetime.datetime.now()
         return date_str.strftime('%Y, %m, %d, %H:%M:%S')

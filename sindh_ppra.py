@@ -162,7 +162,7 @@ class Sindh_Scrapper:
             if len(data) > 0:
 
                 for i in range(len(data)):
-                    # try:
+                    try:
                         opening_date = self.util.convert_iso_datetime(str(data[i]["bidOpeningDate"]))
                         if not self.util.check_expiry(opening_date):
                             doc_id = self.normalize_doc_id(data[i].get("publishedDocumentID"))
@@ -177,8 +177,8 @@ class Sindh_Scrapper:
                                 "category": "None",
                                 "estimated cost": str(data[i]["estimatedCost"])
                             })
-                    # except Exception as e:
-                    #     pass   
+                    except Exception as e:
+                        pass   
                 return [True]
             else:
                 return [False]
