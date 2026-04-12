@@ -189,7 +189,7 @@ Reply with Contact Us if you need assistance.
             if col_name == "categories":
                 self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
             else:
-                self.api.send_document_msg_by_url("image", f"{self.img_url}{col_name}.png", step_msg)
+                self._send_settings_city_prompt(col_name, name[0])
             return True
 
         if not self._is_filter_value_set(filter_data[2]):
@@ -379,11 +379,25 @@ Reply with Contact Us if you need assistance.
 
     def _send_settings_city_prompt(self, city_col, city_name):
         step_msg = self.lang.choose_from_img(city_name)
-        self.api.send_document_msg_by_url(
+        sent = self.api.send_document_msg_by_url(
             "image",
             f"{self.img_url}{city_col}.png",
             step_msg
         )
+        if sent:
+            return
+
+        city_items = prov_cities.get(city_col, {}).get("list", [])
+        if len(city_items) == 0:
+            self.api.send_message(step_msg)
+            return
+
+        lines = [step_msg.strip(), ""]
+        idx = 1
+        for city in city_items:
+            lines.append(f"{idx}. {city}")
+            idx += 1
+        self.api.send_message("\n".join(lines)[:3200])
 
     def _start_settings_city_flow(self):
         filters_resp = self.api.utils.get_filters(self.api.sender)
