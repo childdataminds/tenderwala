@@ -2276,7 +2276,7 @@ Reply with Contact Us if you need assistance.
                 break
 
         if insert_resp.get("status"):
-            self.api.send_message("Reminder saved. I will notify you when reminder time is reached.")
+            self.api.send_message("Reminder saved! I will notify you when reminder time is reached! :)")
             return [True]
 
         self.api.send_message("Unable to save reminder right now. Please try again.")
