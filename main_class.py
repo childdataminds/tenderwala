@@ -470,6 +470,11 @@ Reply with Contact Us if you need assistance.
         return [True]
 
     def process_settings_input(self, msg_text):
+        # During registration, numeric replies must be handled by registration flow,
+        # not by any stale settings-edit context from older sessions.
+        if str(self.api.user_type).upper() == "REGISTERING":
+            return False
+
         self._ensure_settings_context()
         ctx = self.settings_edit_context.get(self.api.sender)
         if not ctx:
@@ -560,6 +565,10 @@ Reply with Contact Us if you need assistance.
         return True
 
     def process_settings_all_button(self, button_id):
+        # During registration, "All ..." buttons should map to registration steps only.
+        if str(self.api.user_type).upper() == "REGISTERING":
+            return False
+
         self._ensure_settings_context()
         ctx = self.settings_edit_context.get(self.api.sender)
         if not ctx:

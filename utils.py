@@ -1,4 +1,4 @@
-import datetime,json,urllib.parse,base64,time,re
+import datetime,json,urllib.parse,base64,time,re,unicodedata
 class ScrapingUtils:
     def __init__(self) -> None:
         pass
@@ -102,8 +102,22 @@ class ScrapingUtils:
         return datetime.datetime.now() > expiry_date
     def get_expiry_date(self,days_):
          return str(datetime.datetime.now() + datetime.timedelta(days=days_))
+
+    def _normalize_numeric_text(self, text):
+         # Convert Unicode digits (e.g., Urdu/Arabic numerals) to ASCII digits.
+         out = []
+         for ch in str(text):
+            if ch in ["\u20e3", "\ufe0f"]:
+                # Ignore keycap/variation selector used in WhatsApp emoji digits.
+                continue
+            try:
+                out.append(str(unicodedata.digit(ch)))
+            except Exception:
+                out.append(ch)
+         return "".join(out)
+
     def get_numbers_list(self,text,items_list):
-            raw = str(text).strip()
+            raw = self._normalize_numeric_text(text).strip()
             if raw.lower() == "all":
                 return [True,"all"]
 
@@ -143,7 +157,7 @@ class ScrapingUtils:
     def map_list(self,text,items_list):
          if type(text) == str:
             if text == "all":
-                list_ = [str(i) for i in range(len(items_list))] 
+                list_ = [str(i) for i in range(1, len(items_list)+1)]
             else:
                 list_ = str(text).replace(" ","").split(",")
          else:
