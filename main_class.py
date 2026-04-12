@@ -146,14 +146,11 @@ Reply with Contact Us if you need assistance.
         text = str(value).strip().lower()
         return text not in ["", "empty", "none", "null"]
 
-    def _selection_value_for_db(self, parsed_value):
-        if parsed_value is None:
-            return ""
-        if isinstance(parsed_value, str):
-            return "all" if parsed_value.strip().lower() == "all" else parsed_value.strip()
+    def _normalized_selection_value(self, parsed_value):
+        if isinstance(parsed_value, str) and parsed_value.strip().lower() == "all":
+            return "all"
         if isinstance(parsed_value, list):
-            cleaned = [str(x).strip() for x in parsed_value if str(x).strip() != ""]
-            return ",".join(cleaned)
+            return ",".join([str(x).strip() for x in parsed_value if str(x).strip() != ""])
         return str(parsed_value).strip()
 
     def _send_registration_next_step_from_filter(self, filter_data):
@@ -192,8 +189,8 @@ Reply with Contact Us if you need assistance.
             col = "provinces"
             input_resp = self.security_utils.get_numbers_list(msg_text, province)
             if input_resp[0]:
-                normalized = self._selection_value_for_db(input_resp[1])
-                resp = self.api.utils.insert_into_filters(self.api.sender, col, normalized, False)
+                selected_value = self._normalized_selection_value(input_resp[1])
+                resp = self.api.utils.insert_into_filters(self.api.sender, col, selected_value, False)
                 if resp.get("status"):
                     self.api.send_message(self.lang.province_success)
                     if not self._send_registration_next_step():
@@ -214,10 +211,10 @@ Reply with Contact Us if you need assistance.
             target_col = col[0]
             input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[target_col]["list"])
             if input_resp[0]:
-                normalized = self._selection_value_for_db(input_resp[1])
-                resp = self.api.utils.insert_into_filters(self.api.sender, target_col, normalized, True)
+                selected_value = self._normalized_selection_value(input_resp[1])
+                resp = self.api.utils.insert_into_filters(self.api.sender, target_col, selected_value, True)
                 if not resp.get("status"):
-                    resp = self.api.utils.insert_into_filters(self.api.sender, target_col, normalized, False)
+                    resp = self.api.utils.insert_into_filters(self.api.sender, target_col, selected_value, False)
 
                 if resp.get("status"):
                     self.api.send_message(self.lang.province_success)
@@ -237,10 +234,10 @@ Reply with Contact Us if you need assistance.
 
         input_resp = self.security_utils.get_numbers_list(msg_text, types)
         if input_resp[0]:
-            normalized = self._selection_value_for_db(input_resp[1])
-            resp = self.api.utils.insert_into_filters(self.api.sender, "types", normalized, True)
+            selected_value = self._normalized_selection_value(input_resp[1])
+            resp = self.api.utils.insert_into_filters(self.api.sender, "types", selected_value, True)
             if not resp.get("status"):
-                resp = self.api.utils.insert_into_filters(self.api.sender, "types", normalized, False)
+                resp = self.api.utils.insert_into_filters(self.api.sender, "types", selected_value, False)
 
             if resp.get("status"):
                 self.api.send_message(self.lang.province_success)
@@ -464,10 +461,10 @@ Reply with Contact Us if you need assistance.
                 return False
             input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[city_col]["list"])
             if input_resp[0]:
-                normalized = self._selection_value_for_db(input_resp[1])
-                resp = self.api.utils.insert_into_filters(self.api.sender, city_col, normalized, True)
+                selected_value = self._normalized_selection_value(input_resp[1])
+                resp = self.api.utils.insert_into_filters(self.api.sender, city_col, selected_value, True)
                 if not resp.get("status"):
-                    resp = self.api.utils.insert_into_filters(self.api.sender, city_col, normalized, False)
+                    resp = self.api.utils.insert_into_filters(self.api.sender, city_col, selected_value, False)
 
                 if resp.get("status"):
                     filters_resp = self.api.utils.get_filters(self.api.sender)
@@ -503,10 +500,10 @@ Reply with Contact Us if you need assistance.
         input_resp = self.security_utils.get_numbers_list(msg_text, info["items"])
 
         if input_resp[0]:
-            normalized = self._selection_value_for_db(input_resp[1])
-            resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, normalized, True)
+            selected_value = self._normalized_selection_value(input_resp[1])
+            resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, selected_value, True)
             if not resp.get("status"):
-                resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, normalized, False)
+                resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, selected_value, False)
 
             if resp.get("status"):
                 if selected_col == "provinces":

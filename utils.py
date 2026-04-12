@@ -152,10 +152,22 @@ class ScrapingUtils:
          return [items_list[int(i)-1] for i in list_ ]
 
     def all_to_list(self,items_list,total):
-       if str(items_list).lower() == "all":
-            return [i for i in range(1,total)]
-       else:
-            return str(items_list).split(",")
+          raw = str(items_list).strip().lower()
+          if raw == "all":
+              return [i for i in range(1,total)]
+
+          tokens = re.findall(r"\d+", str(items_list))
+          values = []
+          for t in tokens:
+              try:
+                  x = int(t)
+              except:
+                  continue
+              if x < 1 or x >= total:
+                  continue
+              if x not in values:
+                  values.append(x)
+          return values
     def cities_selection_logic(self,filter_data,province,filters_list):
        cities_col = filter_data[3:-1]
        completed_steps = []
