@@ -143,7 +143,7 @@ class ScrapingUtils:
     def map_list(self,text,items_list):
          if type(text) == str:
             if text == "all":
-                list_ = [str(i) for i in range(len(items_list))] 
+                list_ = [str(i) for i in range(1, len(items_list) + 1)]
             else:
                 list_ = str(text).replace(" ","").split(",")
          else:
@@ -154,7 +154,7 @@ class ScrapingUtils:
     def all_to_list(self,items_list,total):
           raw = str(items_list).strip().lower()
           if raw == "all":
-              return [i for i in range(1,total)]
+              return [i for i in range(1, total + 1)]
 
           tokens = re.findall(r"\d+", str(items_list))
           values = []
@@ -163,7 +163,7 @@ class ScrapingUtils:
                   x = int(t)
               except:
                   continue
-              if x < 1 or x >= total:
+              if x < 1 or x > total:
                   continue
               if x not in values:
                   values.append(x)
