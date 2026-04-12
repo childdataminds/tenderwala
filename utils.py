@@ -1,4 +1,4 @@
-import datetime,json,urllib.parse,base64,time
+import datetime,json,urllib.parse,base64,time,re
 class ScrapingUtils:
     def __init__(self) -> None:
         pass
@@ -103,20 +103,43 @@ class ScrapingUtils:
     def get_expiry_date(self,days_):
          return str(datetime.datetime.now() + datetime.timedelta(days=days_))
     def get_numbers_list(self,text,items_list):
-         if str(text).lower() == "all":
-            return [True,text]
-         list_ = list(set(str(text).replace(" ","").split(",")))
-         for i in list_:
-            try:
-                 x = int(i)
-            except:
+            raw = str(text).strip()
+            if raw.lower() == "all":
+                return [True,"all"]
+
+            normalized = raw.replace("،", ",")
+            extracted = []
+
+            for part in normalized.split(","):
+                chunk = str(part).strip()
+                if chunk == "":
+                     continue
+
+                # Accept WhatsApp keycap inputs like 5️⃣ and mixed formats like "1 3".
+                nums = re.findall(r"\d+", chunk)
+                if len(nums) == 0:
+                     return [False,chunk]
+                extracted.extend(nums)
+
+            if len(extracted) == 0:
                 return [False,None]
-            try:
-               x = items_list[x-1]
-            except:
-               return [False,i]
-             
-         return True,list_
+
+            # Keep order while removing duplicates.
+            list_ = []
+            for token in extracted:
+                if token not in list_:
+                     list_.append(token)
+
+            for i in list_:
+                try:
+                     x = int(i)
+                except:
+                     return [False,i]
+
+                if x < 1 or x > len(items_list):
+                     return [False,i]
+
+            return True,list_
     def map_list(self,text,items_list):
          if type(text) == str:
             if text == "all":
