@@ -146,37 +146,7 @@ Reply with Contact Us if you need assistance.
         text = str(value).strip().lower()
         return text not in ["", "empty", "none", "null"]
 
-    def _is_valid_province_filter(self, value):
-        if not self._is_filter_value_set(value):
-            return False
-        parsed = self.security_utils.get_numbers_list(str(value), province)
-        return bool(parsed[0])
-
-    def _handle_registration_province_input(self, msg_text):
-        col = "provinces"
-        input_resp = self.security_utils.get_numbers_list(msg_text, province)
-        if input_resp[0]:
-            filters_resp = self.api.utils.get_filters(self.api.sender)
-            has_filters = bool(filters_resp[0])
-            resp = self.api.utils.insert_into_filters(self.api.sender, col, msg_text, has_filters)
-            if resp.get("status"):
-                self.api.send_message(self.lang.province_success)
-                if not self._send_registration_next_step():
-                    self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
-            else:
-                self.api.send_message("Unable to save your region right now. Please try again.")
-            return True
-
-        invalid_value = None if input_resp[1] is None else str(input_resp[1])
-        self.api.send_message(self._registration_input_help(invalid_value))
-        self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
-        return True
-
     def _send_registration_next_step_from_filter(self, filter_data):
-        if not self._is_valid_province_filter(filter_data[1]):
-            self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
-            return True
-
         name, col, _, _ = self.security_utils.cities_selection_logic(
             filter_data,
             self.lang.province,
@@ -209,14 +179,24 @@ Reply with Contact Us if you need assistance.
         filters_resp = self.api.utils.get_filters(self.api.sender)
 
         if not filters_resp[0]:
-            self._handle_registration_province_input(msg_text)
+            col = "provinces"
+            input_resp = self.security_utils.get_numbers_list(msg_text, province)
+            if input_resp[0]:
+                resp = self.api.utils.insert_into_filters(self.api.sender, col, msg_text, False)
+                if resp.get("status"):
+                    self.api.send_message(self.lang.province_success)
+                    if not self._send_registration_next_step():
+                        self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                else:
+                    self.api.send_message("Unable to save your region right now. Please try again.")
+                return
+
+            invalid_value = None if input_resp[1] is None else str(input_resp[1])
+            self.api.send_message(self._registration_input_help(invalid_value))
+            self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
             return
 
         filter_data = filters_resp[1]
-        if not self._is_valid_province_filter(filter_data[1]):
-            self._handle_registration_province_input(msg_text)
-            return
-
         name, col, _, _ = self.security_utils.cities_selection_logic(filter_data, self.lang.province, self.filters_list[1:])
 
         if name is not None and col is not None:
