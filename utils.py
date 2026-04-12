@@ -157,53 +157,35 @@ class ScrapingUtils:
        else:
             return str(items_list).split(",")
     def cities_selection_logic(self,filter_data,province,filters_list):
-          # Keep mapping aligned with ask_prov numbering:
-          # 1=Punjab, 2=Sindh, 3=Balochistan, 4=KPK, 5=AJK, 6=Gilgit, 7=Federal.
-          choice_map = {
-              "1": {"col": "punjab_cities", "name": "Punjab", "idx": 3},
-              "2": {"col": "sindh_cities", "name": "Sindh", "idx": 4},
-              "3": {"col": "balochistan_cities", "name": "Balochistan", "idx": 7},
-              "4": {"col": "kpk_cities", "name": "KPK", "idx": 5},
-              "5": {"col": "ajk_cities", "name": "AJK", "idx": 6},
-              "6": {"col": "gilgit_cities", "name": "Gilgit", "idx": 8},
-          }
-
-          selected_raw = str(filter_data[1]).strip().lower() if len(filter_data) > 1 else ""
-          if selected_raw == "all":
-              # "all" means all regions with city-level filters (federal excluded by design).
-              selected = ["1", "2", "3", "4", "5", "6"]
-          else:
-              selected = [x.strip() for x in str(filter_data[1]).split(",") if x.strip() != ""]
-
-          # Keep order and remove duplicates from user input.
-          ordered_selected = []
-          for item in selected:
-              if item not in ordered_selected:
-                 ordered_selected.append(item)
-
-          pending_cols = []
-          pending_names = []
-          for choice in ordered_selected:
-              # Federal has no city-level step.
-              if choice == "7":
-                 continue
-              meta = choice_map.get(choice)
-              if meta is None:
-                 continue
-
-              city_value = filter_data[meta["idx"]] if len(filter_data) > meta["idx"] else None
-              city_text = "" if city_value is None else str(city_value).strip().lower()
-              if city_text in ["", "empty", "none", "null"]:
-                 pending_cols.append(meta["col"])
-                 pending_names.append(meta["name"])
-
-          if len(pending_cols) == 0:
-              return None,None,None,None
-
-          # Always prompt the first pending city step; subsequent calls will move to next.
-          next_step = pending_names[0]
-          next_col = pending_cols[0]
-          return pending_names,pending_cols,next_step,next_col
+       cities_col = filter_data[3:-1]
+       completed_steps = []
+       c = 1
+       for city in cities_col:
+            if city is None:
+                c += 1
+                continue
+            city_text = str(city).strip().lower()
+            if city_text != "" and city_text != "empty":
+                completed_steps.append(c)
+            c += 1
+       remaining_steps = []
+     
+       for city in self.all_to_list(filter_data[1],7):
+            if int(city) != 7:
+               if int(city) not in completed_steps:
+                   remaining_steps.append(int(city))
+       if len(remaining_steps) > 0:
+              name = self.map_list(remaining_steps,province)
+              col = self.map_list(remaining_steps,filters_list)
+              if len(name) > 1:
+                 next_step = name[1]
+                 next_col = col[1]
+              else:
+                 next_step = "Categories"
+                 next_col = "categories"
+              return name,col,next_step,next_col
+       else:
+             return None,None,None,None
 
 # x = ScrapingUtils()
 # print(x.days_to_open("gilgit_table","03-04-2026"))
