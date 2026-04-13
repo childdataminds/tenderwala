@@ -1571,6 +1571,124 @@ Reply with Contact Us if you need assistance.
         clean = re.sub(r"\s+", " ", str(text)).strip()
         return clean[:5000]
 
+    def _extract_pdf_pages(self, file_path):
+        pages = []
+        reader_cls = None
+        try:
+            from pypdf import PdfReader as _PdfReader
+            reader_cls = _PdfReader
+        except Exception:
+            try:
+                from PyPDF2 import PdfReader as _PdfReader
+                reader_cls = _PdfReader
+            except Exception:
+                reader_cls = None
+
+        if reader_cls is None:
+            return pages
+
+        try:
+            reader = reader_cls(file_path)
+            page_count = len(reader.pages)
+            max_pages = 80 if page_count > 80 else page_count
+            for i in range(max_pages):
+                raw = reader.pages[i].extract_text() or ""
+                normalized = re.sub(r"\s+", " ", str(raw)).strip()
+                pages.append(normalized)
+            return pages
+        except Exception:
+            return []
+
+    def _build_pdf_summary_context(self, file_path):
+        result = {
+            "selected_text": "",
+            "selected_pages": [],
+            "cost_table_pages": [],
+            "docs_section_pages": [],
+        }
+
+        pages = self._extract_pdf_pages(file_path)
+        if len(pages) == 0:
+            return result
+
+        cost_table_idx = []
+        docs_section_idx = []
+
+        for idx, text in enumerate(pages):
+            if text == "":
+                continue
+            low = text.lower()
+
+            has_estimated_cost = re.search(r"estimated\s*cost", low) is not None
+            has_bid_security = re.search(
+                r"bid\s*security|bidding\s*security|cdr|call\s*deposit|earnest\s*money",
+                low
+            ) is not None
+            has_item_col = re.search(r"name\s+of\s+items?", low) is not None
+            if has_estimated_cost and has_bid_security and has_item_col:
+                cost_table_idx.append(idx)
+
+            if "the bidding documents" in low and "content of bidding documents" in low:
+                p1 = low.find("the bidding documents")
+                p2 = low.find("content of bidding documents")
+                if p1 >= 0 and p2 >= 0 and abs(p2 - p1) <= 1400:
+                    docs_section_idx.append(idx)
+
+        selected_idx = []
+        for idx in cost_table_idx:
+            selected_idx.append(idx)
+
+        for idx in docs_section_idx:
+            selected_idx.append(idx)
+            if idx + 1 < len(pages):
+                selected_idx.append(idx + 1)
+
+        smart_terms = [
+            "evaluation criteria", "qualification", "eligibility", "required documents",
+            "mandatory documents", "technical proposal", "financial proposal",
+            "scope of work", "bill of quantities", "estimated cost", "bid security",
+            "ntn", "strn", "pec"
+        ]
+        smart_idx = []
+        for idx, text in enumerate(pages):
+            low = text.lower()
+            if any(term in low for term in smart_terms):
+                smart_idx.append(idx)
+
+        # Keep opening pages as context anchors.
+        if len(pages) > 0:
+            selected_idx.append(0)
+        if len(pages) > 1:
+            selected_idx.append(1)
+
+        # Add a few additional relevant pages.
+        for idx in smart_idx[:6]:
+            selected_idx.append(idx)
+
+        # De-duplicate while preserving order.
+        dedup = []
+        seen = set()
+        for idx in selected_idx:
+            if idx not in seen and idx < len(pages):
+                seen.add(idx)
+                dedup.append(idx)
+
+        # Bound prompt size.
+        dedup = dedup[:10]
+
+        chunks = []
+        for idx in dedup:
+            txt = pages[idx]
+            if txt == "":
+                continue
+            chunks.append(f"[Page {idx + 1}] {txt[:1700]}")
+
+        result["selected_text"] = "\n\n".join(chunks)
+        result["selected_pages"] = [i + 1 for i in dedup]
+        result["cost_table_pages"] = [i + 1 for i in cost_table_idx]
+        result["docs_section_pages"] = [i + 1 for i in docs_section_idx]
+        return result
+
     def _split_doc_sentences(self, doc_text):
         compact = re.sub(r"\s+", " ", str(doc_text)).strip()
         if compact == "":
@@ -1737,12 +1855,14 @@ Reply with Contact Us if you need assistance.
 
         return "\n".join(lines)
 
-    def _build_ai_quick_summary(self, insights, doc_text="", tender_meta=None):
+    def _build_ai_quick_summary(self, insights, doc_text="", tender_meta=None, selected_pdf_context=None):
         openai_key, model = self._openai_config()
         if openai_key == "":
             return [False, "missing_openai_key", ""]
         if tender_meta is None:
             tender_meta = {}
+        if selected_pdf_context is None:
+            selected_pdf_context = {}
 
         cleaned_doc_text = self._sanitize_doc_text_for_summary(doc_text)
         doc_snippet = self._build_summary_context_snippet(doc_text)
@@ -1774,6 +1894,11 @@ Reply with Contact Us if you need assistance.
             "documents_required": insights.get("documents_required", [])[:4],
             "evaluation_criteria": insights.get("evaluation_criteria", [])[:4],
             "overall_points": insights.get("overall_points", [])[:5],
+        }
+        selected_payload = {
+            "selected_pages": selected_pdf_context.get("selected_pages", []),
+            "cost_table_pages": selected_pdf_context.get("cost_table_pages", []),
+            "docs_section_pages": selected_pdf_context.get("docs_section_pages", []),
         }
         meta_payload = {
             "title": tender_meta.get("title", "N/A"),
@@ -1819,12 +1944,16 @@ Reply with Contact Us if you need assistance.
                         "- Keep bullet lists short (max 4 items each)\n"
                         "- Do not include markdown headings or extra sections\n"
                         "- Do not copy website menu/footer text\n"
-                        "- Determine CDR Amount and Estimate Amount primarily from document text and metadata\n"
+                        "- Determine CDR Amount and Estimate Amount primarily from selected PDF pages and metadata\n"
+                        "- Prioritize pages where Estimated Cost, Bid Security and Name of Items appear together\n"
+                        "- For required documents, prioritize pages around 'The bidding documents' and 'Content of Bidding Documents'\n"
                         "- CDR can be either currency value or percentage (example: 2%)\n"
                         "- Use N/A only if value is truly not present in both document text and metadata\n"
-                        "- Use the document excerpt when summarizing\n"
+                        "- Use selected PDF pages first; use generic excerpt only as fallback\n"
                         f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=True)}\n"
+                        f"Selected pages JSON: {json.dumps(selected_payload, ensure_ascii=True)}\n"
                         f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=True)}\n"
+                        f"Selected PDF pages excerpt: {selected_pdf_context.get('selected_text', '')}\n"
                         f"Document excerpt: {doc_snippet}"
                     ),
                 },
@@ -1939,9 +2068,19 @@ Reply with Contact Us if you need assistance.
             local_path = dl_resp[2]
             cleanup_required = dl_resp[3]
             doc_text = self._extract_doc_text(local_path)
-            insights = self._extract_rule_based_doc_insights(doc_text)
+            selected_pdf_context = self._build_pdf_summary_context(local_path)
+            summary_source_text = selected_pdf_context.get("selected_text", "").strip()
+            if summary_source_text == "":
+                summary_source_text = doc_text
+
+            insights = self._extract_rule_based_doc_insights(summary_source_text)
             insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
-            ai_resp = self._build_ai_quick_summary(insights, doc_text=doc_text, tender_meta=tender_meta)
+            ai_resp = self._build_ai_quick_summary(
+                insights,
+                doc_text=summary_source_text,
+                tender_meta=tender_meta,
+                selected_pdf_context=selected_pdf_context
+            )
             if ai_resp[0]:
                 summary_text = ai_resp[2]
             else:
