@@ -2225,14 +2225,14 @@ Reply with Contact Us if you need assistance.
                     "role": "user",
                     "content": (
                         "Read ONLY the provided pages and return ONLY valid JSON with keys exactly:\n"
-                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_summary\n"
+                        "estimated_cost, cdr_amount, required_documents, ai_summary\n"
                         "Rules:\n"
-                        "- cdr_amount and estimate_amount must be concise strings (or N/A)\n"
-                        "- documents_required, evaluation_criteria, overall_summary must be arrays of short strings\n"
-                        "- max 5 items for documents_required\n"
-                        "- max 4 items for evaluation_criteria\n"
-                        "- max 4 items for overall_summary\n"
+                        "- estimated_cost: string, exact value if found, else N/A\n"
+                        "- cdr_amount: string for bid security/CDR/bidding fee, else N/A\n"
+                        "- required_documents: array of short strings, max 8\n"
+                        "- ai_summary: array of 3-5 concise bullet-style strings\n"
                         "- no markdown, no prose outside JSON\n"
+                        "- prefer exact values from page text; do not guess\n"
                         "- use metadata only as weak hint; prioritize page text\n"
                         f"Tender metadata: {json.dumps(meta_payload, ensure_ascii=False)}\n"
                         f"Selected pages text: {selected_text[:90000]}"
@@ -2269,22 +2269,17 @@ Reply with Contact Us if you need assistance.
             parsed = json.loads(answer[start:end + 1])
 
             cdr_amount = str(parsed.get("cdr_amount", "N/A")).strip() or "N/A"
-            estimate_amount = str(parsed.get("estimate_amount", "N/A")).strip() or "N/A"
+            estimate_amount = str(parsed.get("estimated_cost", "N/A")).strip() or "N/A"
 
-            docs = parsed.get("documents_required", [])
+            docs = parsed.get("required_documents", [])
             if not isinstance(docs, list):
                 docs = []
-            docs = [str(x).strip() for x in docs if str(x).strip() != ""][:5]
+            docs = [str(x).strip() for x in docs if str(x).strip() != ""][:8]
 
-            evals = parsed.get("evaluation_criteria", [])
-            if not isinstance(evals, list):
-                evals = []
-            evals = [str(x).strip() for x in evals if str(x).strip() != ""][:4]
-
-            overall = parsed.get("overall_summary", [])
+            overall = parsed.get("ai_summary", [])
             if not isinstance(overall, list):
                 overall = []
-            overall = [str(x).strip() for x in overall if str(x).strip() != ""][:4]
+            overall = [str(x).strip() for x in overall if str(x).strip() != ""][:5]
 
             lines = [
                 "AI Quick Tender Summary",
@@ -2299,14 +2294,7 @@ Reply with Contact Us if you need assistance.
                 for item in docs:
                     lines.append(f"- {item}")
 
-            lines.append("4) Evaluation Criteria:")
-            if len(evals) == 0:
-                lines.append("- N/A")
-            else:
-                for item in evals:
-                    lines.append(f"- {item}")
-
-            lines.append("5) Overall Summary:")
+            lines.append("4) Overall Summary:")
             if len(overall) == 0:
                 lines.append("- N/A")
             else:
