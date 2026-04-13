@@ -11,7 +11,6 @@ import requests
 import tempfile
 import datetime
 import zipfile
-from uuid import uuid4
 from urllib.parse import unquote, urljoin
 from sindh_ppra import Sindh_Scrapper
 
@@ -140,116 +139,74 @@ Reply with Contact Us if you need assistance.
             return "I could not understand your input. Please send valid serial numbers (example: 1,3) or type ALL."
         return f"Invalid value: {invalid_value}. Please send valid serial numbers (example: 1,3) or type ALL."
 
-    def _is_filter_value_set(self, value):
-        if value is None:
-            return False
-        text = str(value).strip().lower()
-        return text not in ["", "empty", "none", "null"]
-
-    def _normalized_selection_value(self, parsed_value):
-        if isinstance(parsed_value, str) and parsed_value.strip().lower() == "all":
-            return "all"
-        if isinstance(parsed_value, list):
-            return ",".join([str(x).strip() for x in parsed_value if str(x).strip() != ""])
-        return str(parsed_value).strip()
-
-    def _send_registration_next_step_from_filter(self, filter_data):
-        name, col, _, _ = self.security_utils.cities_selection_logic(
-            filter_data,
-            self.lang.province,
-            self.filters_list[1:]
-        )
-
-        if name is not None and col is not None:
-            col_name = col[0]
-            step_msg = self.lang.choose_from_img(name[0])
-            if col_name == "categories":
-                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
-            else:
-                self.api.send_document_msg_by_url("image", f"{self.img_url}{col_name}.png", step_msg)
-            return True
-
-        if not self._is_filter_value_set(filter_data[2]):
-            self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
-            return True
-
-        return False
-
-    def _send_registration_next_step(self):
-        filters_resp = self.api.utils.get_filters(self.api.sender)
-        if not filters_resp[0]:
-            self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
-            return False
-        return self._send_registration_next_step_from_filter(filters_resp[1])
-
     def registering_user(self,msg_text):
+        
         filters_resp = self.api.utils.get_filters(self.api.sender)
-
-        if not filters_resp[0]:
+        
+        if filters_resp[0]:
+            filter_data = filters_resp[1]
+            # Removing those steps whose value is already filled in database
+            c = 0
+            
+            for step in filter_data[2:]:
+                if c > 0:
+                    self.is_prov_cities = True
+                if step is None:
+                    break
+                step_text = str(step).strip().lower()
+                if step_text == "" or step_text == "empty":
+                    break
+                c += 1
+            if c == 0:
+                col = "types"
+                input_resp = self.security_utils.get_numbers_list(msg_text,types)
+                step_msg = self.lang.ask_types
+                name,next_col,_,_ = self.security_utils.cities_selection_logic(filter_data,self.lang.province,self.filters_list[1:])
+                
+                next_step = self.lang.choose_from_img(name[0])
+            if self.is_prov_cities:
+                    name,col,next_step,next_col = self.security_utils.cities_selection_logic(filter_data,self.lang.province,self.filters_list[1:])
+                    if name == None:
+                        name = ["Catogaries"]
+                        col = ["categories"]
+                        
+                    
+            
+                    col = col[0]
+                    input_resp = self.security_utils.get_numbers_list(msg_text,prov_cities[col]["list"])
+                    step_msg = self.lang.choose_from_img(name[0])
+                    if next_step != None:
+                        
+                        next_step = self.lang.choose_from_img(next_step)
+            
+                
+        else:
+            step_msg = self.lang.ask_prov
+            next_step = self.lang.ask_types
             col = "provinces"
-            input_resp = self.security_utils.get_numbers_list(msg_text, province)
-            if input_resp[0]:
-                selected_value = self._normalized_selection_value(input_resp[1])
-                resp = self.api.utils.insert_into_filters(self.api.sender, col, selected_value, False)
-                if resp.get("status"):
-                    self.api.send_message(self.lang.province_success)
-                    if not self._send_registration_next_step():
-                        self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
-                else:
-                    self.api.send_message("Unable to save your region right now. Please try again.")
-                return
-
-            invalid_value = None if input_resp[1] is None else str(input_resp[1])
-            self.api.send_message(self._registration_input_help(invalid_value))
-            self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
-            return
-
-        filter_data = filters_resp[1]
-        name, col, _, _ = self.security_utils.cities_selection_logic(filter_data, self.lang.province, self.filters_list[1:])
-
-        if name is not None and col is not None:
-            target_col = col[0]
-            input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[target_col]["list"])
-            if input_resp[0]:
-                selected_value = self._normalized_selection_value(input_resp[1])
-                resp = self.api.utils.insert_into_filters(self.api.sender, target_col, selected_value, True)
-                if not resp.get("status"):
-                    resp = self.api.utils.insert_into_filters(self.api.sender, target_col, selected_value, False)
-
-                if resp.get("status"):
-                    self.api.send_message(self.lang.province_success)
-                    self._send_registration_next_step()
-                else:
-                    self.api.send_message("Unable to save your selection right now. Please try again.")
-                return
-
-            invalid_value = None if input_resp[1] is None else str(input_resp[1])
-            self.api.send_message(self._registration_input_help(invalid_value))
-            step_msg = self.lang.choose_from_img(name[0])
-            if target_col == "categories":
-                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
-            else:
-                self.api.send_document_msg_by_url("image", f"{self.img_url}{target_col}.png", step_msg)
-            return
-
-        input_resp = self.security_utils.get_numbers_list(msg_text, types)
+            input_resp = self.security_utils.get_numbers_list(msg_text,province)
+            self.available = False
+        
         if input_resp[0]:
-            selected_value = self._normalized_selection_value(input_resp[1])
-            resp = self.api.utils.insert_into_filters(self.api.sender, "types", selected_value, True)
-            if not resp.get("status"):
-                resp = self.api.utils.insert_into_filters(self.api.sender, "types", selected_value, False)
-
-            if resp.get("status"):
-                self.api.send_message(self.lang.province_success)
-                self.api.send_btn_msg(self.lang.register_success, ["Send Tenders", "Contact Us", "Change Language!"])
-                self.api.utils.update_user_status(self.api.sender, "TRIAL")
+            resp = self.api.utils.insert_into_filters(self.api.sender,col,msg_text,self.available)
+            self.api.send_message(self.lang.province_success)
+            if self.is_prov_cities:
+                if next_step is not None:
+                        self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/{next_col}.png",next_step)
+                else:
+                        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Contact Us","Change Language!"])
+                        resp = self.api.utils.update_user_status(self.api.sender,"TRIAL")
             else:
-                self.api.send_message("Unable to save contract type right now. Please try again.")
-            return
-
-        invalid_value = None if input_resp[1] is None else str(input_resp[1])
-        self.api.send_message(self._registration_input_help(invalid_value))
-        self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                self.api.send_btn_msg(next_step,["All","Contact Us","Change Language!"],["types",0,1])
+        else:
+            invalid_value = None
+            if input_resp[1] is not None:
+                invalid_value = str(input_resp[1])
+            self.api.send_message(self._registration_input_help(invalid_value))
+            if self.is_prov_cities:
+                    self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/{col}.png",step_msg)
+            else:
+                    self.api.send_btn_msg(step_msg,["All","Contact Us","Change Language!"],[col,0,1])
     
     def benefits(self):
         self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/benefits.png","")
@@ -300,10 +257,37 @@ Reply with Contact Us if you need assistance.
             return True
 
         filter_data = filters_resp[1]
-        if self._send_registration_next_step_from_filter(filter_data):
+        completed = 0
+        is_prov_cities = False
+        for step in filter_data[2:]:
+            if completed > 0:
+                is_prov_cities = True
+            if step is None:
+                break
+            step_text = str(step).strip().lower()
+            if step_text == "" or step_text == "empty":
+                break
+            completed += 1
+
+        if completed == 0:
+            self.api.send_btn_msg(self.lang.ask_types,["All Types","Contact Us","Change Language!"],["types",0,1])
             return True
 
-        self.api.send_btn_msg(self.lang.register_success, ["Send Tenders", "Contact Us", "Change Language!"])
+        if is_prov_cities:
+            name, col, _, _ = self.security_utils.cities_selection_logic(filter_data, self.lang.province, self.filters_list[1:])
+            if name is None:
+                name = ["Categories"]
+                col = ["categories"]
+
+            col_name = col[0]
+            step_msg = self.lang.choose_from_img(name[0])
+            if col_name == "categories":
+                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
+            else:
+                self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/{col_name}.png",step_msg)
+            return True
+
+        self.api.send_btn_msg(self.lang.ask_prov,["All Regions","Contact Us","Change Language!"],["provinces",0,1])
         return True
 
     def resend_previous_step(self):
@@ -461,10 +445,9 @@ Reply with Contact Us if you need assistance.
                 return False
             input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[city_col]["list"])
             if input_resp[0]:
-                selected_value = self._normalized_selection_value(input_resp[1])
-                resp = self.api.utils.insert_into_filters(self.api.sender, city_col, selected_value, True)
+                resp = self.api.utils.insert_into_filters(self.api.sender, city_col, msg_text, True)
                 if not resp.get("status"):
-                    resp = self.api.utils.insert_into_filters(self.api.sender, city_col, selected_value, False)
+                    resp = self.api.utils.insert_into_filters(self.api.sender, city_col, msg_text, False)
 
                 if resp.get("status"):
                     filters_resp = self.api.utils.get_filters(self.api.sender)
@@ -481,9 +464,8 @@ Reply with Contact Us if you need assistance.
                             return True
 
                     self.api.send_message(self.lang.province_success)
-                    ctx["mode"] = None
-                    ctx["col"] = "types"
-                    self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                    self.api.send_message("Setting updated successfully.")
+                    self.settings_edit_context.pop(self.api.sender, None)
                     return True
 
                 self.api.send_message("Unable to update setting right now. Please try again.")
@@ -500,18 +482,17 @@ Reply with Contact Us if you need assistance.
         input_resp = self.security_utils.get_numbers_list(msg_text, info["items"])
 
         if input_resp[0]:
-            selected_value = self._normalized_selection_value(input_resp[1])
-            resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, selected_value, True)
+            resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, msg_text, True)
             if not resp.get("status"):
-                resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, selected_value, False)
+                resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, msg_text, False)
 
             if resp.get("status"):
                 if selected_col == "provinces":
                     self.api.send_message(self.lang.province_success)
                     if self._start_settings_city_flow():
                         return True
-                    ctx["col"] = "types"
-                    self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                    self.api.send_message("Setting updated successfully.")
+                    self.settings_edit_context.pop(self.api.sender, None)
                     return True
 
                 self.api.send_message(self.lang.province_success)
@@ -556,8 +537,8 @@ Reply with Contact Us if you need assistance.
                 self.api.send_message(self.lang.province_success)
                 if self._start_settings_city_flow():
                     return True
-                ctx["col"] = "types"
-                self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                self.api.send_message("Setting updated successfully.")
+                self.settings_edit_context.pop(self.api.sender, None)
                 return True
 
             self.api.send_message(self.lang.province_success)
@@ -763,38 +744,23 @@ Reply with Contact Us if you need assistance.
 
     def register_step_btn_resp(self,button_id):
         col = button_id
-        
+                        
+        self.is_prov_cities = False
         if col == "provinces":
-            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
-            if resp.get("status"):
-                self.api.send_message(self.lang.province_success)
-                self._send_registration_next_step()
-            else:
-                self.api.send_message("Unable to save your region right now. Please try again.")
-            return
-
-        if col == "types":
-            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", True)
-            if not resp.get("status"):
-                resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
-
-            if resp.get("status"):
-                self.api.send_message(self.lang.province_success)
-                self.api.send_btn_msg(self.lang.register_success, ["Send Tenders", "Contact Us", "Change Language!"])
-                self.api.utils.update_user_status(self.api.sender, "TRIAL")
-            else:
-                self.api.send_message("Unable to save contract type right now. Please try again.")
-            return
-
-        resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", True)
-        if not resp.get("status"):
-            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
-
-        if resp.get("status"):
+            self.available = False
+            step_msg = self.lang.ask_types
+            next_col = "types"
+        
+            resp = self.api.utils.insert_into_filters(self.api.sender,col,"all",self.available)
+            
             self.api.send_message(self.lang.province_success)
-            self._send_registration_next_step()
+            self.api.send_btn_msg(step_msg,["All Types","Contact Us","Change Language!"],[next_col,0,1])
+        
         else:
-            self.api.send_message("Unable to save your selection right now. Please try again.")
+            self.is_prov_cities = True
+            resp = self.api.utils.insert_into_filters(self.api.sender,col,"all",True)
+            self.api.send_message(self.lang.province_success)
+            self.registering_user("hi")
     def send_tenders(self,cron=False,old=False,old_table = []):
         
         if not cron:
@@ -1086,23 +1052,22 @@ Reply with Contact Us if you need assistance.
         now_text = str(self.security_utils.get_datetime())
         month_key = self._summary_month_key()
         next_count_text = str(next_count)
-        generated_id = f"{month_key}:{str(phone).strip()}:{uuid4().hex}"
 
         # Insert first when there is no known row id.
         # UPDATE in current DB helper can return success even when 0 rows are affected.
         if row_id is None:
             # Explicit schema insert for the known table definition.
             if self._try_usage_write(
-                ["id", "phone", "month_key", "used_count", "updated_on"],
+                ["phone", "month_key", "used_count", "updated_on"],
                 None,
-                [generated_id, phone, month_key, next_count_text, now_text]
+                [phone, month_key, next_count_text, now_text]
             ):
                 return True
             insert_attempts = [
-                (["id", "phone", "month_key", "used_count", "updated_on"], [generated_id, phone, month_key, next_count_text, now_text]),
-                (["id", "phone", "month_key", "used_count"], [generated_id, phone, month_key, next_count_text]),
-                (["id", "phone", "used_count", "updated_on"], [generated_id, phone, next_count_text, now_text]),
-                (["id", "phone", "used_count"], [generated_id, phone, next_count_text]),
+                (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
+                (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
+                (["phone", "used_count", "updated_on"], [phone, next_count_text, now_text]),
+                (["phone", "used_count"], [phone, next_count_text]),
             ]
             for cols, values in insert_attempts:
                 if self._try_usage_write(cols, None, values):
@@ -1129,10 +1094,10 @@ Reply with Contact Us if you need assistance.
 
         # 2) Retry inserts for monthly/legacy schemas.
         fallback_inserts = [
-            (["id", "phone", "month_key", "used_count", "updated_on"], [generated_id, phone, month_key, next_count_text, now_text]),
-            (["id", "phone", "month_key", "used_count"], [generated_id, phone, month_key, next_count_text]),
-            (["id", "phone", "used_count", "updated_on"], [generated_id, phone, next_count_text, now_text]),
-            (["id", "phone", "used_count"], [generated_id, phone, next_count_text]),
+            (["phone", "month_key", "used_count", "updated_on"], [phone, month_key, next_count_text, now_text]),
+            (["phone", "month_key", "used_count"], [phone, month_key, next_count_text]),
+            (["phone", "used_count", "updated_on"], [phone, next_count_text, now_text]),
+            (["phone", "used_count"], [phone, next_count_text]),
         ]
         for cols, values in fallback_inserts:
             if self._try_usage_write(cols, None, values):
@@ -1409,6 +1374,43 @@ Reply with Contact Us if you need assistance.
             return text[:7000]
         return " ".join(kept[:90])[:12000]
 
+    def _build_summary_context_snippet(self, doc_text, limit=2200):
+        cleaned = self._sanitize_doc_text_for_summary(doc_text)
+        if cleaned == "":
+            return ""
+
+        sentences = self._split_doc_sentences(cleaned)
+        keywords = [
+            "estimated cost",
+            "bidding fee",
+            "bid fee",
+            "tender fee",
+            "documents required",
+            "required documents",
+            "mandatory documents",
+            "evaluation criteria",
+            "scope",
+            "work",
+            "delivery",
+            "completion",
+        ]
+
+        picked = self._pick_keyword_sentences(
+            sentences,
+            keywords,
+            limit=10,
+            min_len=25,
+            max_len=220,
+        )
+
+        if len(picked) == 0:
+            picked = [s[:220] for s in sentences[:8] if len(s.strip()) > 25]
+
+        snippet = "\n".join(picked)
+        if len(snippet) > limit:
+            return snippet[:limit]
+        return snippet
+
     def _enrich_insights_with_tender_meta(self, insights, tender_meta):
         merged = {
             "cdr_amount": insights.get("cdr_amount", "N/A"),
@@ -1546,7 +1548,7 @@ Reply with Contact Us if you need assistance.
                     reader = reader_cls(file_path)
                     chunks = []
                     page_count = len(reader.pages)
-                    max_pages = page_count
+                    max_pages = 12 if page_count > 12 else page_count
                     for i in range(max_pages):
                         page_text = reader.pages[i].extract_text() or ""
                         if page_text.strip() != "":
@@ -1567,7 +1569,7 @@ Reply with Contact Us if you need assistance.
                 text = ""
 
         clean = re.sub(r"\s+", " ", str(text)).strip()
-        return clean[:120000]
+        return clean[:5000]
 
     def _split_doc_sentences(self, doc_text):
         compact = re.sub(r"\s+", " ", str(doc_text)).strip()
@@ -1640,12 +1642,12 @@ Reply with Contact Us if you need assistance.
 
         cdr_amount = self._extract_amount_by_keywords(
             doc_text,
-            ["cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"],
+            ["bidding fee", "bid fee", "tender fee", "processing fee"],
             "Mentioned"
         )
         estimate_amount = self._extract_amount_by_keywords(
             doc_text,
-            ["estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value"],
+            ["estimated cost", "estimated amount", "estimated value", "engineer estimate", "estimate"],
             "Mentioned"
         )
 
@@ -1701,193 +1703,6 @@ Reply with Contact Us if you need assistance.
             "text_length": len(str(doc_text)),
         }
 
-    def _extract_regex_doc_insights(self, doc_text):
-        text = re.sub(r"\s+", " ", str(doc_text)).strip()
-        if text == "":
-            return {
-                "cdr_amount": "N/A",
-                "estimate_amount": "N/A",
-                "documents_required": [],
-                "evaluation_criteria": [],
-            }
-
-        amount_pat = r"(?:rs\.?|pkr)?\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?|[0-9]{1,2}(?:\.[0-9]{1,2})?\s*%"
-
-        def _find_near_amount(keywords, window=140):
-            keys = "|".join([re.escape(k) for k in keywords])
-            if keys == "":
-                return "N/A"
-            m = re.search(rf"(?:{keys}).{{0,{window}}}?({amount_pat})", text, flags=re.IGNORECASE)
-            if m:
-                return m.group(1).strip()
-            m = re.search(rf"({amount_pat}).{{0,90}}?(?:{keys})", text, flags=re.IGNORECASE)
-            if m:
-                return m.group(1).strip()
-            return "N/A"
-
-        cdr_amount = _find_near_amount([
-            "cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"
-        ])
-        estimate_amount = _find_near_amount([
-            "estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value"
-        ])
-
-        doc_patterns = [
-            r"documents? required[:\-]?\s*([^\.\n]{20,260})",
-            r"mandatory documents?[:\-]?\s*([^\.\n]{20,260})",
-            r"submit(?:ted|ting)?[:\-]?\s*([^\.\n]{20,260})",
-        ]
-        eval_patterns = [
-            r"evaluation criteria[:\-]?\s*([^\.\n]{20,260})",
-            r"technical evaluation[:\-]?\s*([^\.\n]{20,260})",
-            r"financial evaluation[:\-]?\s*([^\.\n]{20,260})",
-            r"qualification criteria[:\-]?\s*([^\.\n]{20,260})",
-        ]
-
-        def _collect(patterns, limit=4):
-            out = []
-            seen = set()
-            for pat in patterns:
-                for m in re.finditer(pat, text, flags=re.IGNORECASE):
-                    val = re.sub(r"\s+", " ", str(m.group(1))).strip(" -:;,.\t")
-                    if len(val) < 12:
-                        continue
-                    key = val.lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    out.append(val)
-                    if len(out) >= limit:
-                        return out
-            return out
-
-        return {
-            "cdr_amount": cdr_amount,
-            "estimate_amount": estimate_amount,
-            "documents_required": _collect(doc_patterns, 4),
-            "evaluation_criteria": _collect(eval_patterns, 4),
-        }
-
-    def _merge_missing_with_regex(self, insights, doc_text):
-        regex_insights = self._extract_regex_doc_insights(doc_text)
-        merged = dict(insights)
-
-        if self._na_or_empty(merged.get("cdr_amount")) and (not self._na_or_empty(regex_insights.get("cdr_amount"))):
-            merged["cdr_amount"] = regex_insights.get("cdr_amount")
-        if self._na_or_empty(merged.get("estimate_amount")) and (not self._na_or_empty(regex_insights.get("estimate_amount"))):
-            merged["estimate_amount"] = regex_insights.get("estimate_amount")
-
-        for key in ["documents_required", "evaluation_criteria"]:
-            current = merged.get(key, [])
-            if self._list_na_or_empty(current):
-                candidate = regex_insights.get(key, [])
-                if isinstance(candidate, list) and len(candidate) > 0:
-                    merged[key] = candidate[:4]
-
-        return merged
-
-    def _na_or_empty(self, value):
-        if value is None:
-            return True
-        text = str(value).strip().lower()
-        return text in ["", "n/a", "none", "null"]
-
-    def _list_na_or_empty(self, items):
-        if not isinstance(items, list) or len(items) == 0:
-            return True
-        valid = [x for x in items if not self._na_or_empty(x)]
-        return len(valid) == 0
-
-    def _fill_na_insights_with_ai(self, insights, doc_text, tender_meta):
-        openai_key, model = self._openai_config()
-        if openai_key == "":
-            return insights
-
-        needs_fill = (
-            self._na_or_empty(insights.get("cdr_amount"))
-            or self._na_or_empty(insights.get("estimate_amount"))
-            or self._list_na_or_empty(insights.get("documents_required", []))
-            or self._list_na_or_empty(insights.get("evaluation_criteria", []))
-        )
-        if not needs_fill:
-            return insights
-
-        compact_doc = self._sanitize_doc_text_for_summary(doc_text)
-        if len(compact_doc) < 600:
-            compact_doc = re.sub(r"\s+", " ", str(doc_text)).strip()
-        compact_doc = compact_doc[:50000]
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You extract structured tender facts from procurement documents. "
-                        "Return strict JSON only. Prefer concrete values from document text and metadata. "
-                        "Use N/A only when a value is truly not present."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Return ONLY valid JSON with keys: "
-                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_points. "
-                        "documents_required/evaluation_criteria/overall_points must be arrays of short strings. "
-                        "If a field can be inferred from nearby wording, provide best value instead of N/A. "
-                        f"Tender metadata: {json.dumps(tender_meta, ensure_ascii=False)}\n"
-                        f"Current extracted hints: {json.dumps(insights, ensure_ascii=False)}\n"
-                        f"Document text: {compact_doc}"
-                    ),
-                },
-            ],
-            "temperature": 0.1,
-            "max_tokens": 420,
-        }
-        headers = {
-            "Authorization": f"Bearer {openai_key}",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            resp = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=60,
-            )
-            if resp.status_code != 200:
-                return insights
-
-            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if content == "":
-                return insights
-
-            start = content.find("{")
-            end = content.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                return insights
-
-            parsed = json.loads(content[start:end + 1])
-            merged = dict(insights)
-
-            if self._na_or_empty(merged.get("cdr_amount")) and (not self._na_or_empty(parsed.get("cdr_amount"))):
-                merged["cdr_amount"] = str(parsed.get("cdr_amount")).strip()
-            if self._na_or_empty(merged.get("estimate_amount")) and (not self._na_or_empty(parsed.get("estimate_amount"))):
-                merged["estimate_amount"] = str(parsed.get("estimate_amount")).strip()
-
-            for key in ["documents_required", "evaluation_criteria", "overall_points"]:
-                current = merged.get(key, [])
-                if not isinstance(current, list):
-                    current = []
-                if self._list_na_or_empty(current):
-                    candidate = parsed.get(key, [])
-                    if isinstance(candidate, list):
-                        merged[key] = [str(x).strip() for x in candidate if str(x).strip() != ""][:5]
-
-            return merged
-        except Exception:
-            return insights
-
     def _build_rule_based_summary(self, insights):
         docs = insights.get("documents_required", [])
         evals = insights.get("evaluation_criteria", [])
@@ -1930,6 +1745,7 @@ Reply with Contact Us if you need assistance.
             tender_meta = {}
 
         cleaned_doc_text = self._sanitize_doc_text_for_summary(doc_text)
+        doc_snippet = self._build_summary_context_snippet(doc_text)
 
         cdr_hint = insights.get("cdr_amount", "N/A")
         estimate_hint = insights.get("estimate_amount", "N/A")
@@ -1937,14 +1753,14 @@ Reply with Contact Us if you need assistance.
         if str(cdr_hint).strip().lower() == "n/a":
             cdr_hint = self._extract_amount_by_keywords(
                 cleaned_doc_text,
-                ["cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"],
+                ["bidding fee", "bid fee", "tender fee", "processing fee"],
                 "Mentioned"
             )
 
         if str(estimate_hint).strip().lower() == "n/a":
             estimate_hint = self._extract_amount_by_keywords(
                 cleaned_doc_text,
-                ["estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value", "estimated"],
+                ["estimated cost", "estimated amount", "estimated value", "engineer estimate", "estimate"],
                 "Mentioned"
             )
 
@@ -1976,29 +1792,45 @@ Reply with Contact Us if you need assistance.
                     "role": "system",
                     "content": (
                         "You are an expert procurement assistant for WhatsApp users. "
-                        "Return strict JSON only with separated fields. "
-                        "Use N/A only when the value is truly unavailable in both metadata and text."
+                        "Generate a clean, practical tender summary from provided data. "
+                        "Ignore website navigation/footer boilerplate and malformed HTML fragments. "
+                        "If a detail is not available, write N/A."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        "Return ONLY JSON object with these keys exactly:\n"
-                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_summary\n"
-                        "Rules:\n"
-                        "- documents_required, evaluation_criteria, overall_summary must be arrays of short strings\n"
-                        "- max 4 items per array\n"
-                        "- derive cdr_amount and estimate_amount from document and metadata\n"
-                        "- prefer concrete values over N/A when reasonable from context\n"
-                        "- no markdown, no prose outside JSON\n"
-                        f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=False)}\n"
-                        f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=False)}\n"
-                        f"Document text (cleaned): {cleaned_doc_text[:50000]}"
+                        "Create output in this exact structure:\n"
+                        "AI Quick Tender Summary\n"
+                        "1) CDR Amount: ...\n"
+                        "2) Estimate Amount: ...\n"
+                        "3) Documents Required:\n"
+                        "- ...\n"
+                        "- ...\n"
+                        "4) Evaluation Criteria:\n"
+                        "- ...\n"
+                        "- ...\n"
+                        "5) Overall Summary:\n"
+                        "- ...\n"
+                        "- ...\n"
+                        "\n"
+                        "Guidelines:\n"
+                        "- Keep response compact for WhatsApp\n"
+                        "- Keep bullet lists short (max 4 items each)\n"
+                        "- Do not include markdown headings or extra sections\n"
+                        "- Do not copy website menu/footer text\n"
+                        "- Determine CDR Amount and Estimate Amount primarily from document text and metadata\n"
+                        "- CDR can be either currency value or percentage (example: 2%)\n"
+                        "- Use N/A only if value is truly not present in both document text and metadata\n"
+                        "- Use the document excerpt when summarizing\n"
+                        f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=True)}\n"
+                        f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=True)}\n"
+                        f"Document excerpt: {doc_snippet}"
                     ),
                 },
             ],
             "temperature": 0.2,
-            "max_tokens": 700,
+            "max_tokens": 420,
         }
         headers = {
             "Authorization": f"Bearer {openai_key}",
@@ -2018,59 +1850,7 @@ Reply with Contact Us if you need assistance.
             answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             if answer == "":
                 return [False, "openai_empty_response", ""]
-
-            start = answer.find("{")
-            end = answer.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                return [False, "openai_non_json_response", ""]
-
-            parsed = json.loads(answer[start:end + 1])
-
-            cdr_amount = str(parsed.get("cdr_amount", "N/A")).strip() or "N/A"
-            estimate_amount = str(parsed.get("estimate_amount", "N/A")).strip() or "N/A"
-
-            docs = parsed.get("documents_required", [])
-            if not isinstance(docs, list):
-                docs = []
-            docs = [str(x).strip() for x in docs if str(x).strip() != ""][:4]
-
-            evals = parsed.get("evaluation_criteria", [])
-            if not isinstance(evals, list):
-                evals = []
-            evals = [str(x).strip() for x in evals if str(x).strip() != ""][:4]
-
-            overall = parsed.get("overall_summary", [])
-            if not isinstance(overall, list):
-                overall = []
-            overall = [str(x).strip() for x in overall if str(x).strip() != ""][:4]
-
-            lines = [
-                "AI Quick Tender Summary",
-                f"1) CDR Amount: {cdr_amount if cdr_amount != '' else 'N/A'}",
-                f"2) Estimate Amount: {estimate_amount if estimate_amount != '' else 'N/A'}",
-                "3) Documents Required:",
-            ]
-            if len(docs) == 0:
-                lines.append("- N/A")
-            else:
-                for item in docs:
-                    lines.append(f"- {item}")
-
-            lines.append("4) Evaluation Criteria:")
-            if len(evals) == 0:
-                lines.append("- N/A")
-            else:
-                for item in evals:
-                    lines.append(f"- {item}")
-
-            lines.append("5) Overall Summary:")
-            if len(overall) == 0:
-                lines.append("- N/A")
-            else:
-                for item in overall:
-                    lines.append(f"- {item}")
-
-            return [True, "", "\n".join(lines)]
+            return [True, "", answer]
         except Exception as e:
             return [False, f"openai_error: {str(e)}", ""]
 
@@ -2161,8 +1941,6 @@ Reply with Contact Us if you need assistance.
             doc_text = self._extract_doc_text(local_path)
             insights = self._extract_rule_based_doc_insights(doc_text)
             insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
-            insights = self._merge_missing_with_regex(insights, doc_text)
-            insights = self._fill_na_insights_with_ai(insights, doc_text, tender_meta)
             ai_resp = self._build_ai_quick_summary(insights, doc_text=doc_text, tender_meta=tender_meta)
             if ai_resp[0]:
                 summary_text = ai_resp[2]
@@ -2241,42 +2019,31 @@ Reply with Contact Us if you need assistance.
 
         now_text = str(self.security_utils.get_datetime())
 
-        generated_id = uuid4().hex
-        insert_attempts = [
-            {
-                "cols": ["phone", "tender_id", "tender_table", "reminder_time", "status", "created_on"],
-                "value": [phone, tender_no, tender_table, now_text, "PENDING", now_text]
-            },
-            {
-                "cols": ["id", "phone", "tender_id", "tender_table", "reminder_time", "message", "status", "sent_on", "created_on"],
-                "value": [generated_id, phone, tender_no, tender_table, now_text, "", "PENDING", "", now_text]
-            },
-            {
-                "cols": ["id", "phone", "tender_id", "tender_table"],
-                "value": [generated_id, phone, tender_no, tender_table]
-            },
-            {
-                "cols": ["phone", "tender_id", "tender_table"],
-                "value": [phone, tender_no, tender_table]
-            }
-        ]
+        # Primary insert with tracking fields.
+        insert_payload = {
+            "db": "tenderwala",
+            "table": active_table,
+            "cols": ["phone", "tender_id", "tender_table", "reminder_time", "status", "created_on"],
+            "ops": "INSERT",
+            "where": None,
+            "value": [phone, tender_no, tender_table, now_text, "PENDING", now_text]
+        }
+        insert_resp = db_execute(insert_payload)
 
-        insert_resp = {"status": False, "message": "no_insert_attempted"}
-        for attempt in insert_attempts:
-            payload = {
+        # Fallback for simpler table schemas.
+        if not insert_resp.get("status"):
+            fallback_insert = {
                 "db": "tenderwala",
                 "table": active_table,
-                "cols": attempt["cols"],
+                "cols": ["phone", "tender_id", "tender_table"],
                 "ops": "INSERT",
                 "where": None,
-                "value": attempt["value"]
+                "value": [phone, tender_no, tender_table]
             }
-            insert_resp = db_execute(payload)
-            if insert_resp.get("status"):
-                break
+            insert_resp = db_execute(fallback_insert)
 
         if insert_resp.get("status"):
-            self.api.send_message("Reminder saved! I will notify you when reminder time is reached! :)")
+            self.api.send_message("Reminder saved. I will notify you when reminder time is reached.")
             return [True]
 
         self.api.send_message("Unable to save reminder right now. Please try again.")
