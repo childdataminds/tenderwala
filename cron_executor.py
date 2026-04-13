@@ -544,6 +544,13 @@ class EngageCron:
         self.dispatcher.send(self.notify.api, ADMIN_PHONE, summary)
         return "Engage Cron Completed"
 
+#STATUS HANDLER
+class StatusHandlerCron:
+    def __init__(self) -> None:
+        self.utilities = Utilities()
+    
+    def check_user_status(self):
+        users = self.utilities.get_all_users()
 
 class ReminderCron:
     def __init__(self) -> None:

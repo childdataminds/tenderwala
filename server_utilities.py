@@ -99,7 +99,24 @@ class Utilities:
               return True,""
         except:
               return False,resp
+        
     def update_user_status(self,phone,status):
+         
+         status_norm = str(status).strip().upper()
+
+         if status_norm == "TRIAL":
+            from datetime import datetime, timedelta
+            sub_date = (datetime.now() + timedelta(days=3)).isoformat(sep=" ", timespec="seconds")
+            payload = {
+                "db": "tenderwala",
+                "table": "users_table",
+                "cols": ["subs_date"],
+                "ops": "UPDATE",
+                "where": ["phone"],
+                "value": [sub_date, phone]
+            }
+            resp = db_execute(payload)
+
          payload =  {
             "db":"tenderwala",
             "table":"users_table",
@@ -109,13 +126,12 @@ class Utilities:
             "value":[status,phone]
          }
          resp = db_execute(payload)
-      
-    
-          
+        
          if resp["status"]:
               return True,""
          else:
               return False,resp
+         
     def insert_into_imgs(self,title,id_,date_):
         payload =  {
             "db":"tenderwala",
@@ -255,6 +271,27 @@ class Utilities:
         }
         resp = db_execute(payload)
         return resp
+    
+    def get_unpaid_users(self):
+        payload = {
+            "db": "tenderwala",
+            "table": "users_table",
+            "cols": None,  # Fetch all columns
+            "ops": "SELECT",
+            "where": ['status'],  # No filters to fetch all users
+            "value": ['unpaid']
+        }
+        resp = db_execute(payload)
+        if resp["status"]:
+            if len(resp["data"]) > 0:
+                return [True, resp["data"]]
+            else:
+                return [False, "No users found."]
+        else:
+            return [False, str(resp)]
+        
+    
+    
 
         
 #     def send_email(self,to_email, subject, message):
