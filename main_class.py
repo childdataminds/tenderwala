@@ -1569,6 +1569,99 @@ Reply with Contact Us if you need assistance.
         clean = re.sub(r"\s+", " ", str(text)).strip()
         return clean[:120000]
 
+    def _extract_pdf_page_texts(self, file_path, max_pages=400, max_chars_per_page=3500):
+        pages = []
+        if not file_path or (not os.path.exists(file_path)):
+            return pages
+
+        reader_cls = None
+        try:
+            from pypdf import PdfReader as _PdfReader
+            reader_cls = _PdfReader
+        except Exception:
+            try:
+                from PyPDF2 import PdfReader as _PdfReader
+                reader_cls = _PdfReader
+            except Exception:
+                reader_cls = None
+
+        if reader_cls is None:
+            return pages
+
+        try:
+            reader = reader_cls(file_path)
+            page_count = min(len(reader.pages), max_pages)
+            for i in range(page_count):
+                try:
+                    page_text = reader.pages[i].extract_text() or ""
+                except Exception:
+                    page_text = ""
+                cleaned = re.sub(r"\s+", " ", str(page_text)).strip()
+                pages.append(cleaned[:max_chars_per_page])
+            return pages
+        except Exception:
+            return []
+
+    def _first_last_pages_context(self, file_path, doc_text="", first_n=10, last_n=10):
+        ext = os.path.splitext(str(file_path))[1].lower()
+        page_texts = []
+        if ext == ".pdf":
+            page_texts = self._extract_pdf_page_texts(file_path)
+
+        if len(page_texts) > 0:
+            page_count = len(page_texts)
+            selected_indexes = []
+            selected_seen = set()
+
+            for i in range(min(first_n, page_count)):
+                selected_indexes.append(i)
+                selected_seen.add(i)
+
+            start_last = max(0, page_count - last_n)
+            for i in range(start_last, page_count):
+                if i not in selected_seen:
+                    selected_indexes.append(i)
+                    selected_seen.add(i)
+
+            selected_indexes.sort()
+            chunks = []
+            for i in selected_indexes:
+                content = page_texts[i]
+                if content.strip() == "":
+                    continue
+                chunks.append(f"[PAGE {i + 1}] {content}")
+
+            context_text = "\n\n".join(chunks)
+            context_text = context_text[:90000]
+            return {
+                "page_count": page_count,
+                "selected_count": len(selected_indexes),
+                "context_text": context_text,
+                "selection_note": f"first_{first_n}_and_last_{last_n}_pages"
+            }
+
+        compact = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if compact == "":
+            return {
+                "page_count": 0,
+                "selected_count": 0,
+                "context_text": "",
+                "selection_note": "no_pdf_pages_no_text"
+            }
+
+        head = compact[:45000]
+        tail = compact[-45000:] if len(compact) > 45000 else ""
+        fallback_context = "[HEAD]\n" + head
+        if tail != "":
+            fallback_context += "\n\n[TAIL]\n" + tail
+
+        return {
+            "page_count": 0,
+            "selected_count": 0,
+            "context_text": fallback_context[:90000],
+            "selection_note": "text_head_tail_fallback"
+        }
+
     def _split_doc_sentences(self, doc_text):
         compact = re.sub(r"\s+", " ", str(doc_text)).strip()
         if compact == "":
@@ -1601,30 +1694,43 @@ Reply with Contact Us if you need assistance.
 
         amount_pattern = (
             r"(?:"
-            r"(?:rs\.?|pkr|pak\s*rupees?)\s*[:\-]?\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?"
+            r"(?:rs\.?|pkr|pak\s*rupees?|rupees?)\s*[:\-]?\s*[0-9][0-9,]{0,15}(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?\s*(?:/\-)?"
             r"|"
-            r"[0-9]{1,2}(?:\.[0-9]{1,2})?\s*%"
+            r"[0-9]{1,2}(?:\.[0-9]{1,2})?\s*(?:%|percent)"
             r"|"
-            r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?"
+            r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k|rs\.?|pkr|rupees?))?\s*(?:/\-)?"
+            r"|"
+            r"[0-9]{4,}(?:\.[0-9]{1,2})?\s*(?:million|billion|crore|lakh|thousand|k|rs\.?|pkr|rupees?)\s*(?:/\-)?"
             r")"
         )
         joined_kw = "|".join([re.escape(k) for k in keywords])
         if joined_kw == "":
             return "N/A"
 
-        near_pattern = rf"(?:{joined_kw}).{{0,130}}?({amount_pattern})"
+        def _clean_amount(value):
+            out = str(value).strip()
+            out = re.sub(r"\s+", " ", out)
+            return out.strip(" :;,.\t")
+
+        near_pattern = rf"(?:{joined_kw}).{{0,220}}?({amount_pattern})"
         m = re.search(near_pattern, text, flags=re.IGNORECASE)
         if m:
-            return m.group(1).strip()
+            return _clean_amount(m.group(1))
 
-        reverse_pattern = rf"({amount_pattern}).{{0,80}}?(?:{joined_kw})"
+        reverse_pattern = rf"({amount_pattern}).{{0,140}}?(?:{joined_kw})"
         m2 = re.search(reverse_pattern, text, flags=re.IGNORECASE)
         if m2:
-            return m2.group(1).strip()
+            return _clean_amount(m2.group(1))
+
+        # Structured label form fallback for lines like "Bid Security: 2%" or "Estimated Cost = PKR 5,000,000".
+        label_pattern = rf"(?:{joined_kw})\s*(?::|=|is|shall be|shall not be less than|not less than|at least)?\s*({amount_pattern})"
+        m_label = re.search(label_pattern, text, flags=re.IGNORECASE)
+        if m_label:
+            return _clean_amount(m_label.group(1))
 
         # Sentence-level fallback for cases like "Bid Security shall be 2%".
         sentences = self._split_doc_sentences(text)
-        for sentence in sentences[:120]:
+        for sentence in sentences[:220]:
             if self._is_noise_sentence(sentence):
                 continue
             low = sentence.lower()
@@ -1632,7 +1738,13 @@ Reply with Contact Us if you need assistance.
                 continue
             m3 = re.search(amount_pattern, sentence, flags=re.IGNORECASE)
             if m3:
-                return m3.group(1).strip() if m3.lastindex else m3.group(0).strip()
+                val = m3.group(1).strip() if m3.lastindex else m3.group(0).strip()
+                return _clean_amount(val)
+
+        # Last relaxed fallback: keyword exists but amount is not in a standard format.
+        if fallback_label is not None and str(fallback_label).strip() != "":
+            if any(k in text.lower() for k in [str(x).lower() for x in keywords]):
+                return str(fallback_label).strip()
         return "N/A"
 
     def _extract_rule_based_doc_insights(self, doc_text):
@@ -1640,7 +1752,7 @@ Reply with Contact Us if you need assistance.
 
         cdr_amount = self._extract_amount_by_keywords(
             doc_text,
-            ["cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"],
+            ["cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit", 'bid security'],
             "Mentioned"
         )
         estimate_amount = self._extract_amount_by_keywords(
@@ -2074,6 +2186,137 @@ Reply with Contact Us if you need assistance.
         except Exception as e:
             return [False, f"openai_error: {str(e)}", ""]
 
+    def _build_ai_quick_summary_from_pages(self, file_path, doc_text="", tender_meta=None):
+        openai_key, model = self._openai_config()
+        if openai_key == "":
+            return [False, "missing_openai_key", ""]
+        if tender_meta is None:
+            tender_meta = {}
+
+        ctx = self._first_last_pages_context(file_path, doc_text=doc_text, first_n=10, last_n=10)
+        selected_text = str(ctx.get("context_text", "")).strip()
+        if selected_text == "":
+            return [False, "empty_selected_pages", ""]
+
+        meta_payload = {
+            "title": tender_meta.get("title", "N/A"),
+            "department": tender_meta.get("department", "N/A"),
+            "city": tender_meta.get("city", "N/A"),
+            "category": tender_meta.get("category", "N/A"),
+            "date_opening": tender_meta.get("date_opening", "N/A"),
+            "date_published": tender_meta.get("date_published", "N/A"),
+            "estimated_cost": tender_meta.get("estimated_cost", "N/A"),
+            "page_count": ctx.get("page_count", 0),
+            "selection_note": ctx.get("selection_note", ""),
+        }
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert procurement assistant. "
+                        "Extract tender facts from provided page text. "
+                        "Return strict JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Read ONLY the provided pages and return ONLY valid JSON with keys exactly:\n"
+                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_summary\n"
+                        "Rules:\n"
+                        "- cdr_amount and estimate_amount must be concise strings (or N/A)\n"
+                        "- documents_required, evaluation_criteria, overall_summary must be arrays of short strings\n"
+                        "- max 5 items for documents_required\n"
+                        "- max 4 items for evaluation_criteria\n"
+                        "- max 4 items for overall_summary\n"
+                        "- no markdown, no prose outside JSON\n"
+                        "- use metadata only as weak hint; prioritize page text\n"
+                        f"Tender metadata: {json.dumps(meta_payload, ensure_ascii=False)}\n"
+                        f"Selected pages text: {selected_text[:90000]}"
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "max_tokens": 850,
+        }
+        headers = {
+            "Authorization": f"Bearer {openai_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=90,
+            )
+            if resp.status_code != 200:
+                return [False, f"openai_status_{resp.status_code}", ""]
+
+            answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if answer == "":
+                return [False, "openai_empty_response", ""]
+
+            start = answer.find("{")
+            end = answer.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return [False, "openai_non_json_response", ""]
+
+            parsed = json.loads(answer[start:end + 1])
+
+            cdr_amount = str(parsed.get("cdr_amount", "N/A")).strip() or "N/A"
+            estimate_amount = str(parsed.get("estimate_amount", "N/A")).strip() or "N/A"
+
+            docs = parsed.get("documents_required", [])
+            if not isinstance(docs, list):
+                docs = []
+            docs = [str(x).strip() for x in docs if str(x).strip() != ""][:5]
+
+            evals = parsed.get("evaluation_criteria", [])
+            if not isinstance(evals, list):
+                evals = []
+            evals = [str(x).strip() for x in evals if str(x).strip() != ""][:4]
+
+            overall = parsed.get("overall_summary", [])
+            if not isinstance(overall, list):
+                overall = []
+            overall = [str(x).strip() for x in overall if str(x).strip() != ""][:4]
+
+            lines = [
+                "AI Quick Tender Summary",
+                f"1) CDR Amount: {cdr_amount if cdr_amount != '' else 'N/A'}",
+                f"2) Estimate Amount: {estimate_amount if estimate_amount != '' else 'N/A'}",
+                "3) Documents Required:",
+            ]
+
+            if len(docs) == 0:
+                lines.append("- N/A")
+            else:
+                for item in docs:
+                    lines.append(f"- {item}")
+
+            lines.append("4) Evaluation Criteria:")
+            if len(evals) == 0:
+                lines.append("- N/A")
+            else:
+                for item in evals:
+                    lines.append(f"- {item}")
+
+            lines.append("5) Overall Summary:")
+            if len(overall) == 0:
+                lines.append("- N/A")
+            else:
+                for item in overall:
+                    lines.append(f"- {item}")
+
+            return [True, "", "\n".join(lines)]
+        except Exception as e:
+            return [False, f"openai_error: {str(e)}", ""]
+
     def ai_summary(self,tender_id,table):
         phone = str(self.api.sender).strip() if self.api.sender is not None else ""
         tender_no = str(tender_id).strip() if tender_id is not None else ""
@@ -2159,14 +2402,13 @@ Reply with Contact Us if you need assistance.
             local_path = dl_resp[2]
             cleanup_required = dl_resp[3]
             doc_text = self._extract_doc_text(local_path)
-            insights = self._extract_rule_based_doc_insights(doc_text)
-            insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
-            insights = self._merge_missing_with_regex(insights, doc_text)
-            insights = self._fill_na_insights_with_ai(insights, doc_text, tender_meta)
-            ai_resp = self._build_ai_quick_summary(insights, doc_text=doc_text, tender_meta=tender_meta)
+            ai_resp = self._build_ai_quick_summary_from_pages(local_path, doc_text=doc_text, tender_meta=tender_meta)
             if ai_resp[0]:
                 summary_text = ai_resp[2]
             else:
+                insights = self._extract_rule_based_doc_insights(doc_text)
+                insights = self._enrich_insights_with_tender_meta(insights, tender_meta)
+                insights = self._merge_missing_with_regex(insights, doc_text)
                 summary_text = self._build_rule_based_summary(insights)
 
             next_count = used_count + 1
