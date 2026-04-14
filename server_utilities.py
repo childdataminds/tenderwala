@@ -100,6 +100,21 @@ class Utilities:
         except:
               return False,resp
         
+    def get_unregistered_users(self):
+        payload =  {
+            "db":"tenderwala",
+            "table":"users_table",
+            "cols":None,
+            "ops":"SELECT",
+            "where":["status"],
+            "value":['visitor', 'registering']
+        }
+        resp = db_execute(payload)
+        if resp['status']:
+            if len(resp['data']) > 0:
+                return [True, resp['data']]
+            else:
+                return [False]
     def update_user_status(self,phone,status):
          
          status_norm = str(status).strip().upper()
@@ -290,6 +305,26 @@ class Utilities:
         else:
             return [False, str(resp)]
         
+    def get_trial_over_users(self):
+        from datetime import datetime
+        current_date = datetime.now().strftime('%Y-%m-%d')
+
+        payload = {
+            "db": "tenderwala",
+            "table": "users_table",
+            "cols": None,  # Fetch all columns
+            "ops": "SELECT",
+            "where": ["status", "subs_date !="],
+            "value": ["trial", current_date]
+        }
+        resp = db_execute(payload)
+        if resp["status"]:
+            if len(resp["data"]) > 0:
+                return [True, resp["data"]]
+            else:
+                return [False, "No users found."]
+        else:
+            return [False, str(resp)]
     
     
 
@@ -318,4 +353,4 @@ class Utilities:
 #         # Send the message
 #         server.sendmail(smtp_username, to_email, msg.as_string())
 #         server.quit()
-    
+

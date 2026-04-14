@@ -21,6 +21,86 @@ HARDCODED_OPENAI_API_KEY = "sk-proj-6b5KVr-eHDuHpV0Tl1seM3FVKRPZYvg0wvu9N_3GSK4F
 HARDCODED_OPENAI_MODEL = "gpt-4o-mini"
 
 class TenderWala:
+        # --- Subscription Payment Flow ---
+    def handle_subscription_button(self, button_id):
+        # Step 1: User selects a plan
+        if button_id in ["plan_1m", "plan_3m", "plan_1y"]:
+            plan_map = {"plan_1m": "1 Month", "plan_3m": "3 Months", "plan_1y": "1 Year"}
+            self.api.session = getattr(self.api, 'session', {})
+            self.api.session['selected_plan'] = plan_map[button_id]
+            self.api.send_btn_msg(
+                "Kindly press confirm after processing payment.",
+                ["Payment Done"],
+                ["payment_done"]
+            )
+            return
+
+        # Step 2: User presses Payment Done
+        if button_id == "payment_done":
+            plan = self.api.session.get('selected_plan', "Unknown Plan") if hasattr(self.api, 'session') else "Unknown Plan"
+            user_name = self.api.sender_name or "Customer"
+            user_contact = self.api.sender
+            admin_msg = (
+                f"Payment confirmation request:\n"
+                f"User Name: {user_name}\n"
+                f"Contact: {user_contact}\n"
+                f"Plan: {plan}\n"
+                f"Payment done?"
+            )
+            # Send to admin with Yes/No buttons
+            self.api.sender = "923056842507"  # Admin phone
+            self.api.send_btn_msg(
+                admin_msg,
+                ["Yes", "No"],
+                [f"admin_payment_yes|{user_contact}|{plan}", f"admin_payment_no|{user_contact}|{plan}"]
+            )
+            self.api.sender = user_contact  # Restore sender
+            self.api.send_message("Your payment confirmation has been sent to admin. You'll be notified once approved.")
+            return
+
+        # Step 3: Admin presses Yes/No
+        if button_id.startswith("admin_payment_yes"):
+            # Format: admin_payment_yes|user_contact|plan
+            parts = button_id.split("|")
+            if len(parts) >= 3:
+                user_contact = parts[1]
+                plan = parts[2]
+                # Calculate new subs_date
+                from datetime import datetime, timedelta
+                days = 30 if "1 Month" in plan else (90 if "3 Month" in plan else 365)
+                new_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+                self.api.utils.update_user_status(user_contact, "PAID")
+                payload = {
+                    "db": "tenderwala",
+                    "table": "users_table",
+                    "cols": ["subs_date"],
+                    "ops": "UPDATE",
+                    "where": ["phone"],
+                    "value": [new_date, user_contact]
+                }
+                db_execute(payload)
+                # Notify user
+                self.api.sender = user_contact
+                self.api.send_message(f"Your payment has been confirmed and your subscription is now active for {plan}.")
+                self.api.sender = "923056842507"  # Restore admin
+                self.api.send_message(f"User {user_contact} subscription activated for {plan}.")
+            return
+        if button_id.startswith("admin_payment_no"):
+            parts = button_id.split("|")
+            if len(parts) >= 3:
+                user_contact = parts[1]
+                plan = parts[2]
+                self.api.sender = user_contact
+                self.api.send_message("Your payment could not be confirmed. Please contact support if you have already paid.")
+                self.api.sender = "923056842507"
+                self.api.send_message(f"User {user_contact} payment for {plan} was not confirmed.")
+            return
+
+    # Add this to your main button handler or router
+    def handle_button(self, button_id):
+            # Call this from your main WhatsApp webhook/button handler
+            self.handle_subscription_button(button_id)
+            # ...add other button handling logic here as needed...
     def __init__(self):
         self.security_utils = ScrapingUtils()
         self.api = metaWhatsappAPI()
