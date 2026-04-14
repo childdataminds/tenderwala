@@ -1829,44 +1829,96 @@ Reply with Contact Us if you need assistance.
         return "N/A"
 
     def _extract_rule_based_doc_insights(self, doc_text):
+        import re
         sentences = self._split_doc_sentences(doc_text)
+        text = str(doc_text)
+        lines = text.splitlines()
 
-        cdr_amount = self._extract_amount_by_keywords(
-            doc_text,
-            ["cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit", 'bid security'],
-            "Mentioned"
-        )
-        estimate_amount = self._extract_amount_by_keywords(
-            doc_text,
-            ["estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value"],
-            "Mentioned"
-        )
+        # --- Estimated Cost ---
+        est_cost = "N/A"
+        est_cost_pattern = re.compile(r"Estimated Cost\s*:?\s*([\d,]+\s*/-)", re.IGNORECASE)
+        est_cost_match = est_cost_pattern.search(text)
+        if est_cost_match:
+            est_cost = est_cost_match.group(1).strip()
+        else:
+            for i, line in enumerate(lines):
+                if re.search(r"Estimated Cost", line, re.IGNORECASE):
+                    for j in range(1, 3):
+                        if i + j < len(lines):
+                            m = re.search(r"([\d,]+\s*/-)" , lines[i + j])
+                            if m:
+                                est_cost = m.group(1).strip()
+                                break
+                    if est_cost != "N/A":
+                        break
 
-        docs_required = self._pick_keyword_sentences(
-            sentences,
-            [
-                "documents required", "mandatory documents", "required documents",
-                "submit", "submission", "attached", "annex", "certificate",
-                "ntn", "strn", "pec", "registration", "affidavit", "bank statement",
-                "experience", "undertaking", "bid form"
-            ],
-            limit=5,
-            min_len=20,
-            max_len=200
-        )
+        # --- CDR/Bidding Fee ---
+        cdr = "N/A"
+        cdr_pattern = re.compile(r"bidding fee[\w\s\(\)%:]*?([\d,]+\s*/-)", re.IGNORECASE)
+        cdr_match = cdr_pattern.search(text)
+        if cdr_match:
+            cdr = cdr_match.group(1).strip()
+        else:
+            for i, line in enumerate(lines):
+                if re.search(r"bidding fee", line, re.IGNORECASE):
+                    for j in range(1, 3):
+                        if i + j < len(lines):
+                            m = re.search(r"([\d,]+\s*/-)" , lines[i + j])
+                            if m:
+                                cdr = m.group(1).strip()
+                                break
+                    if cdr != "N/A":
+                        break
 
-        eval_criteria = self._pick_keyword_sentences(
-            sentences,
-            [
-                "evaluation criteria", "technical evaluation", "financial evaluation", "evaluation",
-                "responsive", "qualification criteria", "marks", "scoring", "weightage",
-                "lowest evaluated", "most advantageous"
-            ],
-            limit=5,
-            min_len=20,
-            max_len=200
-        )
+        # --- Required Documents ---
+        docs_required = []
+        docs_pattern = re.compile(r"(required documents|bidding documents)\s*:?\s*(.*)", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            m = docs_pattern.search(line)
+            if m:
+                for j in range(1, 6):
+                    if i + j < len(lines):
+                        doc_line = lines[i + j].strip()
+                        if doc_line == '' or len(doc_line) < 3:
+                            continue
+                        if re.search(r"criteria|amount|cost|fee|summary", doc_line, re.IGNORECASE):
+                            break
+                        docs_required.append(doc_line)
+                break
+        if not docs_required:
+            docs_required = self._pick_keyword_sentences(
+                sentences,
+                ["documents required", "mandatory documents", "required documents", "bidding documents"],
+                limit=5,
+                min_len=10,
+                max_len=200
+            )
 
+        # --- Evaluation Criteria ---
+        eval_criteria = []
+        crit_pattern = re.compile(r"criteria\s*:?\s*(.*)", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            m = crit_pattern.search(line)
+            if m:
+                for j in range(1, 6):
+                    if i + j < len(lines):
+                        crit_line = lines[i + j].strip()
+                        if crit_line == '' or len(crit_line) < 3:
+                            continue
+                        if re.search(r"documents|amount|cost|fee|summary", crit_line, re.IGNORECASE):
+                            break
+                        eval_criteria.append(crit_line)
+                break
+        if not eval_criteria:
+            eval_criteria = self._pick_keyword_sentences(
+                sentences,
+                ["criteria", "evaluation criteria", "technical evaluation", "financial evaluation"],
+                limit=5,
+                min_len=10,
+                max_len=200
+            )
+
+        # --- Overall Points (unchanged) ---
         overall_points = self._pick_keyword_sentences(
             sentences,
             [
@@ -1886,8 +1938,8 @@ Reply with Contact Us if you need assistance.
             ][:4]
 
         return {
-            "cdr_amount": cdr_amount,
-            "estimate_amount": estimate_amount,
+            "cdr_amount": cdr,
+            "estimate_amount": est_cost,
             "documents_required": docs_required,
             "evaluation_criteria": eval_criteria,
             "overall_points": overall_points,
