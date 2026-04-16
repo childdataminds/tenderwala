@@ -159,11 +159,12 @@ class Faderal_Scraper:
 
                 
 from utils import ScrapingUtils
-utils = ScrapingUtils()       
 
-scrap = Faderal_Scraper(utils=utils)
-print(scrap.initiate_scraper()  )
-print(len(scrap.ppra_data)) 
+if __name__ == "__main__":
+    utils = ScrapingUtils()
+    scrap = Faderal_Scraper(utils=utils)
+    print(scrap.initiate_scraper())
+    print(len(scrap.ppra_data))
 
 """
 1: Tender No
