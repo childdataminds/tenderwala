@@ -580,6 +580,7 @@ Reply with Contact Us if you need assistance.
         info = self._settings_target_info(selected_col)
         input_resp = self.security_utils.get_numbers_list(msg_text, info["items"])
 
+
         if input_resp[0]:
             selected_value = self._normalized_selection_value(input_resp[1])
             resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, selected_value, True)
@@ -589,9 +590,24 @@ Reply with Contact Us if you need assistance.
             if resp.get("status"):
                 if selected_col == "provinces":
                     self.api.send_message(self.lang.province_success)
-                    if self._start_settings_city_flow():
-                        return True
+                    # Always set context to expect city input and prompt for city after province selection
+                    filters_resp = self.api.utils.get_filters(self.api.sender)
+                    if filters_resp[0]:
+                        filter_data = filters_resp[1]
+                        name, col, _, _ = self.security_utils.cities_selection_logic(
+                            filter_data,
+                            self.lang.province,
+                            self.filters_list[1:]
+                        )
+                        if name is not None and col is not None:
+                            ctx["col"] = "provinces"
+                            ctx["mode"] = "cities"
+                            ctx["city_col"] = col[0]
+                            self._send_settings_city_prompt(col[0], name[0])
+                            return True
+                    # If no cities found, skip to types
                     ctx["col"] = "types"
+                    ctx["mode"] = None
                     self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
                     return True
 
