@@ -100,6 +100,12 @@ class CronMessageDispatcher:
         return names[0]
 
     def send(self, api, phone, text, preferred_template="welcome_msg"):
+        # Ensure text is a clean str (decode bytes if necessary)
+        if isinstance(text, bytes):
+            try:
+                text = text.decode("utf-8", "replace")
+            except Exception:
+                text = str(text)
         api.sender = str(phone)
         if self.is_within_24h_window(phone):
             sent = api.send_message(str(text))
@@ -862,7 +868,37 @@ def thread_func(target):
         cron = RegistrationCron()
     else:
         cron = ScrapingCron()
-    thread = threading.Thread(target=cron.start, args=(target,))
+    # run cron in a wrapper to capture exceptions and produce clean logs/messages
+    def _run_wrapper():
+        try:
+            cron.start(target)
+        except Exception as e:
+            import traceback, os
+            try:
+                tb = traceback.format_exc()
+            except Exception:
+                tb = str(e)
+            # sanitize traceback to UTF-8
+            try:
+                tb_clean = tb.encode("utf-8", "replace").decode("utf-8", "replace")
+            except Exception:
+                tb_clean = str(tb)
+            log_line = f"{datetime.now().isoformat()} - Cron '{target}' raised exception:\n{tb_clean}\n"
+            try:
+                with open("cron_error.log", "a", encoding="utf-8") as f:
+                    f.write(log_line)
+            except Exception:
+                pass
+            # attempt to notify admin with a trimmed, safe message
+            try:
+                admin_api = TenderWala().api
+                admin_api.sender = ADMIN_PHONE
+                summary = f"Cron {target} failed: {str(e)[:1000]}"
+                CronMessageDispatcher().send(admin_api, ADMIN_PHONE, summary)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run_wrapper)
     thread.start()
     return True
 async def cron_func():
