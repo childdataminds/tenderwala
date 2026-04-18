@@ -243,16 +243,30 @@ Reply with Contact Us if you need assistance.
         if name is not None and col is not None:
             col_name = col[0]
             step_msg = self.lang.choose_from_img(name[0])
+            self.api.send_message(f"DEBUG: Prompting for {col_name}")
             if col_name == "categories":
                 self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
             else:
                 self.api.send_document_msg_by_url("image", f"{self.img_url}{col_name}.png", step_msg)
             return True
 
+        # Fallback: If Balochistan or categories not set, prompt for them
+        if not self._is_filter_value_set(filter_data[7]):
+            self.api.send_message("DEBUG: Fallback to Balochistan cities")
+            step_msg = self.lang.choose_from_img("Balochistan")
+            self.api.send_document_msg_by_url("image", f"{self.img_url}balochistan_cities.png", step_msg)
+            return True
+        if not self._is_filter_value_set(filter_data[8]):
+            self.api.send_message("DEBUG: Fallback to categories")
+            step_msg = self.lang.choose_from_img("Categories")
+            self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
+            return True
+
         if not self._is_filter_value_set(filter_data[2]):
             self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
             return True
 
+        self.api.send_message("DEBUG: Registration step could not determine next step.")
         return False
 
     def _send_registration_next_step(self):
