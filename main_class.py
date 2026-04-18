@@ -233,32 +233,35 @@ Reply with Contact Us if you need assistance.
             return ",".join([str(x).strip() for x in parsed_value if str(x).strip() != ""])
         return str(parsed_value).strip()
 
-    def _send_registration_next_step_from_filter(self, filter_data):
-        name, col, _, _ = self.security_utils.cities_selection_logic(
-            filter_data,
-            self.lang.province,
-            self.filters_list[1:]
-        )
 
-        # If next step is available, prompt for it
-        if name is not None and col is not None:
-            col_name = col[0]
-            step_msg = self.lang.choose_from_img(name[0])
-            if col_name == "categories":
-                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
-            else:
-                self.api.send_document_msg_by_url("image", f"{self.img_url}{col_name}.png", step_msg)
+    def _send_registration_next_step_from_filter(self, filter_data):
+        # Order: region (provinces), city, type, category
+        # filter_data: [sender, provinces, types, categories, ...cities]
+        # 0: sender, 1: provinces, 2: types, 3: categories, 4+: cities
+
+        # Prompt for region if not set
+        if len(filter_data) < 2 or not self._is_filter_value_set(filter_data[1]):
+            self.api.send_btn_msg(self.lang.ask_prov, ["All Regions", "Contact Us", "Change Language!"], ["provinces", 0, 1])
             return True
 
         # Prompt for type if not set
-        if not self._is_filter_value_set(filter_data[2]):
+        if len(filter_data) < 3 or not self._is_filter_value_set(filter_data[2]):
             self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
             return True
 
         # Prompt for category if not set
-        if len(filter_data) > 3 and not self._is_filter_value_set(filter_data[3]):
+        if len(filter_data) < 4 or not self._is_filter_value_set(filter_data[3]):
             self.api.send_btn_msg(self.lang.ask_categories, ["All Categories", "Contact Us", "Change Language!"], ["categories", 0, 1])
             return True
+
+        # Prompt for city if not set (if cities are required for this province)
+        # Assume cities start from index 4
+        if len(filter_data) > 4:
+            for idx, city_val in enumerate(filter_data[4:], start=4):
+                if not self._is_filter_value_set(city_val):
+                    # Ask for city selection (customize as needed)
+                    self.api.send_btn_msg(self.lang.ask_cities, ["All Cities", "Contact Us", "Change Language!"], [f"city_{idx-3}", 0, 1])
+                    return True
 
         # Registration complete
         self.api.send_message("Registration complete! You can now use Send Tenders or Change Settings.")
