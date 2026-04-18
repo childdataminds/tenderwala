@@ -297,10 +297,15 @@ Reply with Contact Us if you need assistance.
             return
 
         filter_data = filters_resp[1]
+
         name, col, _, _ = self.security_utils.cities_selection_logic(filter_data, self.lang.province, self.filters_list[1:])
 
+        # --- Patch: Ensure Balochistan city selection is triggered ---
         if name is not None and col is not None:
             target_col = col[0]
+            # Patch: If province is Balochistan, ensure correct city key
+            if target_col == "3" or (isinstance(target_col, str) and target_col.lower() == "balochistan_cities"):
+                target_col = "balochistan_cities"
             input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[target_col]["list"])
             if input_resp[0]:
                 selected_value = self._normalized_selection_value(input_resp[1])
