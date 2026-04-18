@@ -115,26 +115,24 @@ class TenderWala:
         self.registered_user = False
         self.new_user = False
         if not user_resp[0]:
-                user_resp = self.api.utils.insert_into_user(
-                    self.api.sender_name,
-                    str(self.api.sender),
-                    self.security_utils.get_datetime(),
-                    "VISITOR"
-                )
-                self.api.user_type = "VISITOR"
-                lang_ = "ur"
+            user_resp = self.api.utils.insert_into_user(
+                self.api.sender_name,
+                str(self.api.sender),
+                self.security_utils.get_datetime(),
+                "VISITOR"
+            )
+            self.api.user_type = "VISITOR"
+            lang_ = "ur"
         else:
-                # print("resp: ",user_resp[1])
-                self.api.user_type = user_resp[1][2]
-                lang_ = "ur"
-                if len(user_resp[1]) > 6 and str(user_resp[1][6]).strip().lower() in ["ur", "en"]:
-                    lang_ = str(user_resp[1][6]).strip().lower()
-            
+            self.api.user_type = user_resp[1][2]
+            lang_ = "ur"
+            if len(user_resp[1]) > 6 and str(user_resp[1][6]).strip().lower() in ["ur", "en"]:
+                lang_ = str(user_resp[1][6]).strip().lower()
+
         if lang_ == "ur":
-                self.lang = Urdu()
+            self.lang = Urdu()
         else:
-                self.lang = English()
-            
+            self.lang = English()
 
         self.lang.sender = self.api.sender
         self.lang.user = self.api.sender_name
@@ -144,6 +142,29 @@ class TenderWala:
         self.available = True
         self.filter_data = None
         self.filters_list = self.api.register_steps[1:]
+
+        # Patch: For existing users, check for missing/empty filters and re-prompt if needed
+        filters_resp = self.api.utils.get_filters(self.api.sender)
+        if filters_resp[0]:
+            filter_data = filters_resp[1]
+            # Check for missing or 'empty' cities or categories
+            missing = False
+            # Check all city columns and categories
+            city_keys = ["punjab_cities","sindh_cities","kpk_cities","balochistan_cities","ajk_cities","gilgit_cities"]
+            for idx, key in enumerate(city_keys, start=2):
+                if len(filter_data) > idx:
+                    val = str(filter_data[idx]).strip().lower()
+                    if val == "empty" or val == "" or val == "none":
+                        missing = True
+                        break
+            # Check categories (should be at index 8 or last)
+            if len(filter_data) > 8:
+                cat_val = str(filter_data[8]).strip().lower()
+                if cat_val == "empty" or cat_val == "" or cat_val == "none":
+                    missing = True
+            if missing:
+                # Force user type to REGISTERING to trigger registration flow
+                self.api.user_type = "REGISTERING"
     def paid_user_func(self):
         name = self.api.sender_name if self.api.sender_name else "Customer"
         txt = f"""
