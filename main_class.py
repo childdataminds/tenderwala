@@ -240,6 +240,7 @@ Reply with Contact Us if you need assistance.
             self.filters_list[1:]
         )
 
+        # If next step is available, prompt for it
         if name is not None and col is not None:
             col_name = col[0]
             step_msg = self.lang.choose_from_img(name[0])
@@ -249,11 +250,19 @@ Reply with Contact Us if you need assistance.
                 self.api.send_document_msg_by_url("image", f"{self.img_url}{col_name}.png", step_msg)
             return True
 
+        # Prompt for type if not set
         if not self._is_filter_value_set(filter_data[2]):
             self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
             return True
 
-        return False
+        # Prompt for category if not set
+        if len(filter_data) > 3 and not self._is_filter_value_set(filter_data[3]):
+            self.api.send_btn_msg(self.lang.ask_categories, ["All Categories", "Contact Us", "Change Language!"], ["categories", 0, 1])
+            return True
+
+        # Registration complete
+        self.api.send_message("Registration complete! You can now use Send Tenders or Change Settings.")
+        return True
 
     def _send_registration_next_step(self):
         filters_resp = self.api.utils.get_filters(self.api.sender)
