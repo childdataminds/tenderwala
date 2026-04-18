@@ -904,76 +904,78 @@ Reply with Contact Us if you need assistance.
             return [False,"Your settings are incomplete. Please use Change Settings to select your preferences first."]
         filters = filters[1]
         
+        import traceback
         def inner(cron,old,old_table,filters,security_utils,api,lang):
-            already_sent_list = []
-            not_available_list = []
-            count = 0
-            if not cron:
-                categories = security_utils.map_list(str(filters[-1]),prov_cities["categories"]["list"])
-                for prov_i in str(filters[1]).replace(" ","").split(","):
-                    never_sent = True
-                    for prov in prov_indexes[prov_i]:
-                        t = prov.split("_")[0]
-                        col = t+"_cities"
-                        if old and t not in old_table:
-                            continue
-                        else:
-                            count = 0
-                        if col != "federal_cities":
-                            prov_name = prov_cities[col]["name"]
-                            cities_of_prov = prov_cities[col]["list"]
-                            cities_of_prov = security_utils.map_list(filters[prov_cities[col]["col_index"]],cities_of_prov)
-                        else:
-                            prov_name = "Federal"
-                        tenders = api.utils.get_tenders(prov,None)
-                        if tenders[0]:
-                            for tender in tenders[1]:
-                                send = False
-                                if col != "federal_cities" and any(str(tender[6]).lower().split(" ")[0] in city for city in cities_of_prov) and (any(str(tender[7]).lower().split(" ")[0] in cat for cat in categories) or str(tender[7]).lower() == "none" ):
-                                    send = True
-                                    
-                                elif col == "federal_cities" and (any(str(tender[7]).lower() in cat for cat in categories) or str(tender[7]).lower() == "none" ):
-                                    send = True
-                                
-                                sent_list = str(tender[-1]).split(",")
-                                if send and (old or api.sender not in sent_list):
-                                        
-                                        never_sent = False
-                                        if col == "sindh_cities":
-                                            note = f"Estimate Amount of Tender is {tender[-2]}\nOnly *{str(security_utils.days_to_open(col,tender[5]))} day(s) in opening"
-                                        else:
-                                            note = f"Only *{str(security_utils.days_to_open(col,tender[5]))} day(s) in opening"
-                                        data = [tender[1],tender[4],tender[5],tender[2],tender[6],note]
-                                        msg = lang.tender_msg(prov_name,data)
-                                        api.send_btn_msg(msg,["Bid Documents","Tender Summary (AI)","Remind Me!"],[f"{tender[0]}&&{prov}&&0",f"{tender[0]}&&{prov}&&1",f"{tender[0]}&&{prov}&&2"])
-
-                                        if not old:
-                                            if str(tender[-1]).lower() == "none":
-                                                sent_to = api.sender
+            try:
+                already_sent_list = []
+                not_available_list = []
+                count = 0
+                if not cron:
+                    categories = security_utils.map_list(str(filters[-1]),prov_cities["categories"]["list"])
+                    for prov_i in str(filters[1]).replace(" ","").split(","):
+                        never_sent = True
+                        for prov in prov_indexes[prov_i]:
+                            t = prov.split("_")[0]
+                            col = t+"_cities"
+                            if old and t not in old_table:
+                                continue
+                            else:
+                                count = 0
+                            if col != "federal_cities":
+                                prov_name = prov_cities[col]["name"]
+                                cities_of_prov = prov_cities[col]["list"]
+                                cities_of_prov = security_utils.map_list(filters[prov_cities[col]["col_index"]],cities_of_prov)
+                            else:
+                                prov_name = "Federal"
+                            tenders = api.utils.get_tenders(prov,None)
+                            if tenders[0]:
+                                for tender in tenders[1]:
+                                    send = False
+                                    if col != "federal_cities" and any(str(tender[6]).lower().split(" ")[0] in city for city in cities_of_prov) and (any(str(tender[7]).lower().split(" ")[0] in cat for cat in categories) or str(tender[7]).lower() == "none" ):
+                                        send = True
+                                    elif col == "federal_cities" and (any(str(tender[7]).lower() in cat for cat in categories) or str(tender[7]).lower() == "none" ):
+                                        send = True
+                                    sent_list = str(tender[-1]).split(",")
+                                    if send and (old or api.sender not in sent_list):
+                                            never_sent = False
+                                            if col == "sindh_cities":
+                                                note = f"Estimate Amount of Tender is {tender[-2]}\nOnly *{str(security_utils.days_to_open(col,tender[5]))} day(s) in opening"
                                             else:
-                                                sent_to = str(tender[-1])+f",{api.sender}"
-                                            api.utils.update_tenders_sent_to(prov,sent_to,tender[0])
-                                        else:
-                                            if count == 5:
-                                                break
+                                                note = f"Only *{str(security_utils.days_to_open(col,tender[5]))} day(s) in opening"
+                                            data = [tender[1],tender[4],tender[5],tender[2],tender[6],note]
+                                            msg = lang.tender_msg(prov_name,data)
+                                            api.send_btn_msg(msg,["Bid Documents","Tender Summary (AI)","Remind Me!"],[f"{tender[0]}&&{prov}&&0",f"{tender[0]}&&{prov}&&1",f"{tender[0]}&&{prov}&&2"])
+                                            if not old:
+                                                if str(tender[-1]).lower() == "none":
+                                                    sent_to = api.sender
+                                                else:
+                                                    sent_to = str(tender[-1])+f",{api.sender}"
+                                                api.utils.update_tenders_sent_to(prov,sent_to,tender[0])
                                             else:
-                                                count += 1
-                            
-                            if never_sent:
-                                    already_sent_list.append(prov_name)     
-                        else:
-                             not_available_list.append(prov_name)
-                if not old and len(already_sent_list) > 0:
-                    txt = "✅"
-                    txt += "\n✅".join(already_sent_list)
-                    api.send_btn_msg(lang.all_tenders_already_sent(txt),["Get Old Tenders","Change Settings","Change Language!"],[",".join(already_sent_list),"0","1"]) 
-                if len(not_available_list) > 0:
-                    txt = "⚠️"
-                    txt += "\n⚠️".join(not_available_list)
-                    api.send_btn_msg(lang.no_tender_available_msg(txt),["Change Settings","Change Language!"]) 
+                                                if count == 5:
+                                                    break
+                                                else:
+                                                    count += 1
+                                if never_sent:
+                                        already_sent_list.append(prov_name)     
+                            else:
+                                 not_available_list.append(prov_name)
+                    if not old and len(already_sent_list) > 0:
+                        txt = "✅"
+                        txt += "\n✅".join(already_sent_list)
+                        api.send_btn_msg(lang.all_tenders_already_sent(txt),["Get Old Tenders","Change Settings","Change Language!"],[",".join(already_sent_list),"0","1"]) 
+                    if len(not_available_list) > 0:
+                        txt = "⚠️"
+                        txt += "\n⚠️".join(not_available_list)
+                        api.send_btn_msg(lang.no_tender_available_msg(txt),["Change Settings","Change Language!"]) 
+            except Exception as e:
+                tb = traceback.format_exc()
+                try:
+                    api.send_message(f"An error occurred while sending tenders. Please contact support.\nError: {e}\n{tb[:1000]}")
+                except Exception:
+                    pass
         thread = threading.Thread(target=inner,args=(cron,old,old_table,filters,self.security_utils,self.api,self.lang,))
         thread.start()
-        # inner(cron,filters,self.security_utils,self.api,self.lang)
         return [True]
     def send_demo_tenders(self,limit=10):
         table_map = {
