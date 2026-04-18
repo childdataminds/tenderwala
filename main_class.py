@@ -149,8 +149,8 @@ class TenderWala:
             filter_data = filters_resp[1]
             # Check for missing or 'empty' cities or categories
             missing = False
-            # Check all city columns and categories
-            city_keys = ["punjab_cities","sindh_cities","kpk_cities","balochistan_cities","ajk_cities","gilgit_cities"]
+            # Match city_keys order to DB: punjab, kpk, sindh, balochistan, ajk, gilgit
+            city_keys = ["punjab_cities","kpk_cities","sindh_cities","balochistan_cities","ajk_cities","gilgit_cities"]
             for idx, key in enumerate(city_keys, start=2):
                 if len(filter_data) > idx:
                     val = str(filter_data[idx]).strip().lower()
