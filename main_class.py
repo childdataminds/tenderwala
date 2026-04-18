@@ -911,6 +911,10 @@ Reply with Contact Us if you need assistance.
                 not_available_list = []
                 count = 0
                 if not cron:
+                    # Check for 'empty' in filters to avoid ValueError
+                    if 'empty' in str(filters[-1]).split(','):
+                        api.send_message("Your category selection is incomplete. Please use Change Settings to select your preferences.")
+                        return
                     categories = security_utils.map_list(str(filters[-1]),prov_cities["categories"]["list"])
                     for prov_i in str(filters[1]).replace(" ","").split(","):
                         never_sent = True
