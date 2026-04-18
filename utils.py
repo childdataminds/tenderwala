@@ -183,9 +183,9 @@ class ScrapingUtils:
        remaining_steps = []
      
        for city in self.all_to_list(filter_data[1],7):
-           # Do not skip city 7 (Balochistan)
-           if int(city) not in completed_steps:
-               remaining_steps.append(int(city))
+            if int(city) != 7:
+               if int(city) not in completed_steps:
+                   remaining_steps.append(int(city))
        if len(remaining_steps) > 0:
               name = self.map_list(remaining_steps,province)
               col = self.map_list(remaining_steps,filters_list)
