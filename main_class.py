@@ -2185,31 +2185,44 @@ Reply with Contact Us if you need assistance.
 
         lines = ["AI Quick Tender Summary"]
 
-        cdr = insights.get('cdr_amount', None)
-        if cdr and str(cdr).strip().lower() not in ["n/a", "none", "null", ""]:
-            lines.append(f"1) CDR Amount: {cdr}")
-
+        # 1. Estimated Amount
         estimate = insights.get('estimate_amount', None)
         if estimate and str(estimate).strip().lower() not in ["n/a", "none", "null", ""]:
-            lines.append(f"2) Estimate Amount: {estimate}")
+            lines.append(f"1) Estimated Amount: {estimate}")
+        else:
+            lines.append("1) Estimated Amount: Not found")
 
-        if docs:
-            lines.append("3) Documents Required:")
-            for item in docs[:4]:
-                lines.append(f"- {item}")
+        # 2. CDR (Bidding Fee)
+        cdr = insights.get('cdr_amount', None)
+        if cdr and str(cdr).strip().lower() not in ["n/a", "none", "null", ""]:
+            lines.append(f"2) CDR (Bidding Fee): {cdr}")
+        else:
+            lines.append("2) CDR (Bidding Fee): Not found")
 
+        # 3. Eligibility Criteria
+        lines.append("3) Eligibility Criteria (Who can apply):")
         if evals:
-            lines.append("4) Evaluation Criteria:")
             for item in evals[:4]:
                 lines.append(f"- {item}")
+        else:
+            lines.append("- Not found")
 
+        # 4. Required Documents
+        lines.append("4) Required Documents:")
+        if docs:
+            for item in docs[:4]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- Not found")
+
+        # 5. AI Summary (Overall)
+        lines.append("5) AI Summary:")
         if overall:
-            lines.append("5) Overall Summary:")
             for item in overall[:3]:
                 lines.append(f"- {item}")
+        else:
+            lines.append("- Not found")
 
-        if len(lines) == 1:
-            return "No key information could be extracted from the document."
         return "\n".join(lines)
 
     def _build_ai_quick_summary(self, insights, doc_text="", tender_meta=None):
