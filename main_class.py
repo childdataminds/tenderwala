@@ -2574,13 +2574,52 @@ Reply with Contact Us if you need assistance.
         cleanup_required = False
         try:
             dl_resp = self._download_doc_for_summary(doc_ref, tender_table)
+
+            # Diagnostic: record download and extraction info to a debug file
+            try:
+                debug_lines = []
+                debug_lines.append(f"doc_ref: {str(doc_ref)}")
+                debug_lines.append(f"download_ok: {dl_resp[0]}")
+                debug_lines.append(f"download_msg: {str(dl_resp[1])}")
+            except Exception:
+                debug_lines = []
+
             if not dl_resp[0]:
+                try:
+                    os.makedirs("static", exist_ok=True)
+                    debug_file = os.path.join("static", f"ai_debug_{tender_no}.txt")
+                    with open(debug_file, "w", encoding="utf-8") as dbg:
+                        dbg.write("\n".join(debug_lines))
+                except Exception:
+                    pass
                 self.api.send_message("Unable to download document for summary right now.")
                 return [False, dl_resp[1]]
 
             local_path = dl_resp[2]
             cleanup_required = dl_resp[3]
-            doc_text = self._extract_doc_text(local_path)
+            try:
+                size = os.path.getsize(local_path) if local_path and os.path.exists(local_path) else 0
+            except Exception:
+                size = 0
+
+            try:
+                doc_text = self._extract_doc_text(local_path)
+            except Exception:
+                doc_text = ""
+
+            try:
+                debug_lines.append(f"local_path: {local_path}")
+                debug_lines.append(f"local_size: {size}")
+                debug_lines.append(f"doc_text_len: {len(doc_text)}")
+                preview = doc_text[:1000].replace("\n", " ") if doc_text else ""
+                debug_lines.append(f"doc_preview: {preview}")
+                os.makedirs("static", exist_ok=True)
+                debug_file = os.path.join("static", f"ai_debug_{tender_no}.txt")
+                with open(debug_file, "w", encoding="utf-8") as dbg:
+                    dbg.write("\n".join(debug_lines))
+            except Exception:
+                pass
+
             ai_resp = self._build_ai_quick_summary_from_pages(local_path, doc_text=doc_text, tender_meta=tender_meta)
             if ai_resp[0]:
                 summary_text = ai_resp[2]
