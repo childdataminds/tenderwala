@@ -285,6 +285,12 @@ Reply with Contact Us if you need assistance.
                 resp = self.api.utils.insert_into_filters(self.api.sender, col, selected_value, False)
                 if resp.get("status"):
                     self.api.send_message(self.lang.province_success)
+                    # If Balochistan is selected, force city selection
+                    if (selected_value == "3" or selected_value.lower() == "balochistan"):
+                        # Clear any previous city selection for Balochistan
+                        self.api.utils.insert_into_filters(self.api.sender, "balochistan_cities", "", True)
+                        self.api.send_btn_msg(self.lang.ask_cities, ["All Cities", "Contact Us", "Change Language!"], ["city_1", 0, 1])
+                        return
                     if not self._send_registration_next_step():
                         self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
                 else:
