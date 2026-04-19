@@ -2179,37 +2179,37 @@ Reply with Contact Us if you need assistance.
             return insights
 
     def _build_rule_based_summary(self, insights):
-        docs = insights.get("documents_required", [])
-        evals = insights.get("evaluation_criteria", [])
-        overall = insights.get("overall_points", [])
+        docs = [d for d in insights.get("documents_required", []) if d and str(d).strip().lower() not in ["n/a", "none", "null", ""]]
+        evals = [e for e in insights.get("evaluation_criteria", []) if e and str(e).strip().lower() not in ["n/a", "none", "null", ""]]
+        overall = [o for o in insights.get("overall_points", []) if o and str(o).strip().lower() not in ["n/a", "none", "null", ""]]
 
-        lines = [
-            "AI Quick Tender Summary",
-            f"1) CDR Amount: {insights.get('cdr_amount', 'N/A')}",
-            f"2) Estimate Amount: {insights.get('estimate_amount', 'N/A')}",
-            "3) Documents Required:",
-        ]
+        lines = ["AI Quick Tender Summary"]
 
-        if len(docs) == 0:
-            lines.append("- N/A")
-        else:
+        cdr = insights.get('cdr_amount', None)
+        if cdr and str(cdr).strip().lower() not in ["n/a", "none", "null", ""]:
+            lines.append(f"1) CDR Amount: {cdr}")
+
+        estimate = insights.get('estimate_amount', None)
+        if estimate and str(estimate).strip().lower() not in ["n/a", "none", "null", ""]:
+            lines.append(f"2) Estimate Amount: {estimate}")
+
+        if docs:
+            lines.append("3) Documents Required:")
             for item in docs[:4]:
                 lines.append(f"- {item}")
 
-        lines.append("4) Evaluation Criteria:")
-        if len(evals) == 0:
-            lines.append("- N/A")
-        else:
+        if evals:
+            lines.append("4) Evaluation Criteria:")
             for item in evals[:4]:
                 lines.append(f"- {item}")
 
-        lines.append("5) Overall Summary:")
-        if len(overall) == 0:
-            lines.append("- N/A")
-        else:
+        if overall:
+            lines.append("5) Overall Summary:")
             for item in overall[:3]:
                 lines.append(f"- {item}")
 
+        if len(lines) == 1:
+            return "No key information could be extracted from the document."
         return "\n".join(lines)
 
     def _build_ai_quick_summary(self, insights, doc_text="", tender_meta=None):
