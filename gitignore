@@ -1,0 +1,13 @@
+venv/
+static/
+downloads/
+media/
+backups/
+logs/
+files/
+
+*.xlsx
+*.csv
+*.json
+*.log
+.env

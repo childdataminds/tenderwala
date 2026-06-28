@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings Saved</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --text: #10213a;
+      --muted: #5f6f86;
+      --border: #d7e0ea;
+      --primary: #1f6feb;
+      --shadow: 0 18px 45px rgba(16, 33, 58, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: linear-gradient(180deg, #eef4fb 0%, var(--bg) 100%);
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+    }
+
+    .card {
+      width: 100%;
+      max-width: 640px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      padding: 34px 28px;
+      text-align: center;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 32px;
+      line-height: 1.2;
+    }
+
+    p {
+      margin: 0 0 14px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 15px;
+    }
+
+    .phone {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: #f8fbff;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .link {
+      display: inline-block;
+      margin-top: 16px;
+      color: var(--primary);
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .link:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Settings Saved</h1>
+    <p>Your TenderWala filters have been saved successfully.</p>
+    <p>Please return to WhatsApp. Your confirmation and next-status message have been sent there.</p>
+    {% if phone %}
+    <div class="phone">Phone: {{ phone }}</div>
+    {% endif %}
+    <div>
+      <a class="link" href="/registration{% if phone %}?phone={{ phone }}{% endif %}">Back to Settings</a>
+    </div>
+  </div>
+</body>
+</html>

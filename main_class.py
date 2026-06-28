@@ -1,0 +1,3595 @@
+from whatsappAPIs import metaWhatsappAPI,categories,cities,province,prov_cities,types,prov_indexes
+from msg_templates import Urdu,English
+from utils import ScrapingUtils
+from backend import db_execute
+import os
+import re
+import json
+import pickle
+import requests
+import tempfile
+import datetime
+import zipfile
+from uuid import uuid4
+from urllib.parse import unquote, urljoin
+from sindh_ppra import Sindh_Scrapper, KPK_Scrapper
+
+ADMIN_PHONE = "923056842507"
+
+# Hardcoded OpenAI config.
+# Prefer files/openai.txt or environment variables in runtime.
+HARDCODED_OPENAI_API_KEY = ""
+HARDCODED_OPENAI_MODEL = "gpt-4o-mini"
+
+class TenderWala:
+        # --- Subscription Payment Flow ---
+    def _parse_datetime(self, raw_value):
+        if raw_value is None:
+            return None
+        value = str(raw_value).strip()
+        if value == "" or value.lower() == "none":
+            return None
+
+        normalized = value.replace("T", " ").replace("Z", "")
+        try:
+            return datetime.datetime.fromisoformat(normalized)
+        except Exception:
+            pass
+
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%Y, %m, %d, %H:%M:%S",
+            "%Y, %m, %d, %H, %M, %S",
+            "%d-%m-%Y %H:%M:%S",
+            "%d-%m-%Y"
+        ]
+        for fmt in formats:
+            try:
+                return datetime.datetime.strptime(normalized, fmt)
+            except Exception:
+                continue
+        return None
+
+    def _is_within_24h_window(self, phone):
+        payload = {
+            "db": "tenderwala",
+            "table": "users_table",
+            "cols": ["last_texted_on"],
+            "ops": "SELECT",
+            "where": ["phone"],
+            "value": [str(phone).strip()]
+        }
+        resp = db_execute(payload)
+        if not resp.get("status") or len(resp.get("data", [])) == 0:
+            return False
+
+        raw_last = resp["data"][0][0] if len(resp["data"][0]) > 0 else None
+        last_dt = self._parse_datetime(raw_last)
+        if last_dt is None:
+            return False
+
+        return (datetime.datetime.now() - last_dt) <= datetime.timedelta(hours=24)
+
+    def _mark_user_texted(self, phone):
+        try:
+            self.api.utils.update_texted_on(str(phone).strip(), str(self.security_utils.get_datetime()))
+        except Exception:
+            pass
+
+    def handle_subscription_button(self, button_id):
+        # Step 1: User selects a plan
+        if button_id in ["plan_1m", "plan_3m", "plan_1y"]:
+            plan_map = {"plan_1m": "1 Month", "plan_3m": "3 Months", "plan_1y": "1 Year"}
+            self.api.session = getattr(self.api, 'session', {})
+            self.api.session['selected_plan'] = plan_map[button_id]
+            if self._is_within_24h_window(self.api.sender):
+                sent = self.api.send_btn_msg(
+                    "Kindly press confirm after processing payment.",
+                    ["Payment Done"],
+                    ["payment_done"]
+                )
+            else:
+                sent = self.api.send_template_msg(
+                    "renewal_confirmation",
+                    body_params=[self.api.sender_name or "Customer", plan_map[button_id]]
+                )
+            if sent:
+                self._mark_user_texted(self.api.sender)
+            return
+
+        # Step 2: User presses Payment Done
+        if button_id == "payment_done":
+            plan = self.api.session.get('selected_plan', "Unknown Plan") if hasattr(self.api, 'session') else "Unknown Plan"
+            user_name = self.api.sender_name or "Customer"
+            user_contact = self.api.sender
+            admin_msg = (
+                f"Payment confirmation request:\n"
+                f"User Name: {user_name}\n"
+                f"Contact: {user_contact}\n"
+                f"Plan: {plan}\n"
+                f"Payment done?"
+            )
+            # Send to admin with Yes/No buttons
+            self.api.sender = "923056842507"  # Admin phone
+            self.api.send_btn_msg(
+                admin_msg,
+                ["Yes", "No"],
+                [f"admin_payment_yes|{user_contact}|{plan}", f"admin_payment_no|{user_contact}|{plan}"]
+            )
+            self.api.sender = user_contact  # Restore sender
+            self.api.send_message("Your payment confirmation has been sent to admin. You'll be notified once approved.")
+            return
+
+        # Step 3: Admin presses Yes/No
+        if button_id.startswith("admin_payment_yes"):
+            # Format: admin_payment_yes|user_contact|plan
+            parts = button_id.split("|")
+            if len(parts) >= 3:
+                user_contact = parts[1]
+                plan = parts[2]
+                # Calculate new subs_date
+                from datetime import datetime, timedelta
+                days = 30 if "1 Month" in plan else (90 if "3 Month" in plan else 365)
+                new_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+                self.api.utils.update_user_status(user_contact, "PAID")
+                payload = {
+                    "db": "tenderwala",
+                    "table": "users_table",
+                    "cols": ["subs_date"],
+                    "ops": "UPDATE",
+                    "where": ["phone"],
+                    "value": [new_date, user_contact]
+                }
+                db_execute(payload)
+                # Notify user
+                self.api.sender = user_contact
+                if self._is_within_24h_window(user_contact):
+                    sent = self.api.send_btn_msg(
+                        f"Your payment has been confirmed and your subscription is now active for {plan}.",
+                        ["Send Tenders"],
+                        ["send_more_tenders"]
+                    )
+                else:
+                    sent = self.api.send_template_msg(
+                        "payment_success",
+                        body_params=[plan],
+                        button_payloads=["send_more_tenders"]
+                    )
+                if sent:
+                    self._mark_user_texted(user_contact)
+                self.api.sender = "923056842507"  # Restore admin
+                self.api.send_message(f"User {user_contact} subscription activated for {plan}.")
+            return
+        if button_id.startswith("admin_payment_no"):
+            parts = button_id.split("|")
+            if len(parts) >= 3:
+                user_contact = parts[1]
+                plan = parts[2]
+                self.api.sender = user_contact
+                self.api.send_message("Your payment could not be confirmed. Please contact support if you have already paid.")
+                self.api.sender = "923056842507"
+                self.api.send_message(f"User {user_contact} payment for {plan} was not confirmed.")
+            return
+
+    # Add this to your main button handler or router
+    def handle_button(self, button_id):
+            # Call this from your main WhatsApp webhook/button handler
+            self.handle_subscription_button(button_id)
+            # ...add other button handling logic here as needed...
+    def __init__(self):
+        self.security_utils = ScrapingUtils()
+        self.api = metaWhatsappAPI()
+        self.img_url = "https://tenderwala.thedataminds.us/media/"
+        self.web_registration_url = "https://tenderwala.thedataminds.us/registration"
+        self.settings_edit_context = {}
+    def setup(self,value):
+        message = value['messages'][0]
+        self.api.sender = message['from']
+        self.api.sender_name = str(value['contacts'][0]['profile']['name'])
+        user_resp = self.api.utils.get_selected_user(self.api.sender)
+        self.paid_user = False
+        self.registered_user = False
+        self.new_user = False
+        if not user_resp[0]:
+                insert_resp = self.api.utils.insert_into_user(
+                    self.api.sender_name,
+                    str(self.api.sender),
+                    self.security_utils.get_datetime(),
+                    "VISITOR"
+                )
+                if isinstance(insert_resp, dict) and insert_resp.get("status"):
+                    user_resp = self.api.utils.get_selected_user(self.api.sender)
+                else:
+                    user_resp = [False, insert_resp]
+                self.api.user_type = "VISITOR"
+                lang_ = "en"
+        else:
+                # print("resp: ",user_resp[1])
+                self.api.user_type = user_resp[1][2]
+                lang_ = "en"
+                if len(user_resp[1]) > 6 and str(user_resp[1][6]).strip().lower() in ["ur", "en"]:
+                    lang_ = str(user_resp[1][6]).strip().lower()
+            
+        if lang_ == "ur":
+                self.lang = Urdu()
+        else:
+                self.lang = English()
+            
+
+        self.lang.sender = self.api.sender
+        self.lang.user = self.api.sender_name
+        self.lang.messages()
+
+        self.is_prov_cities = False
+        self.available = True
+        self.filter_data = None
+        self.filters_list = self.api.register_steps[1:]
+    def paid_user_func(self):
+        name = self.api.sender_name if self.api.sender_name else "Customer"
+        txt = f"""
+Welcome back, {name}!
+
+Your TenderWala account is active and ready.
+Available functions:
+1- Send Tenders
+2- Change Settings
+3- Change Language
+4- Search tenders by message
+"""
+        self.paid_user = True
+        return txt
+    def unpaid_user_func(self):
+        name = self.api.sender_name if self.api.sender_name else "Customer"
+        if self.lang.type == "ur":
+            txt = f"""
+{name}, aap ki subscription active nahi hai.
+
+Tenders dobara receive karne ke liye apni subscription renew/subscribe karein.
+Madad ke liye Contact Us par reply karein.
+"""
+        else:
+            txt = f"""
+{name}, your subscription is currently inactive.
+
+Please subscribe again to continue receiving daily tenders.
+Reply with Contact Us if you need assistance.
+"""
+        self.registered_user = True
+        return txt
+    def visitor_user_func(self):
+        if not self.new_user:
+            txt = self.lang.new_user_1
+            self.new_user = True
+        else:
+            txt = self.lang.new_user_2
+
+        # resp_img_id = self.api.utils.get_imgs("welcome")
+        # print("imgs db resp: ", resp_img_id)
+        # send_img = False
+        # if resp_img_id[0]:
+        #      if not security_utils.check_expiry(resp_img_id[1][-1]):
+        #          img_id = resp_img_id[1][1]
+        #          send_img = True
+        # if not send_img:
+        #        img_id = self.api.upload_media("Welcome.png")
+        #        resp = self.api.utils.insert_into_imgs("welcome",img_id,security_utils.get_expiry_date(30))
+        #        print("insert into imgs db: ",resp)
+        #        send_img = True
+        # if send_img:
+        #      self.api.send_document_msg_by_id("image",img_id)
+        self.api.send_document_msg_by_url("image",f"{self.img_url}Welcome.png","")
+        
+                    
+
+        self.api.send_btn_msg(
+            txt,
+            ["Free Demo","Change Language!","Contact Us"]
+        )
+    def _registration_input_help(self, invalid_value=None):
+        if self.lang.type == "ur":
+            if invalid_value is None:
+                return (
+                    "Aap ka input samajh nahi aaya. "
+                    "Barah-e-karam sirf numbers comma ke sath bhejein (misal: 1,3) ya ALL likhein."
+                )
+            return (
+                f"Yeh value durust nahi hai: {invalid_value}. "
+                "Barah-e-karam sahi serial numbers bhejein (misal: 1,3) ya ALL likhein."
+            )
+        if invalid_value is None:
+            return "I could not understand your input. Please send valid serial numbers (example: 1,3) or type ALL."
+        return f"Invalid value: {invalid_value}. Please send valid serial numbers (example: 1,3) or type ALL."
+
+    def _build_registration_link(self):
+        return f"{self.web_registration_url}?phone={str(self.api.sender).strip()}"
+
+    def _send_registration_web_link(self, change_settings=False):
+        link_url = self._build_registration_link()
+        if self.lang.type == "ur":
+            text = (
+                "اپنی سیٹنگز ویب پیج پر منتخب کریں۔ "
+                "Province, Cities, Categories اور Types آسانی سے multi-select کر سکتے ہیں۔"
+            )
+            if change_settings:
+                text = "اپنی Tender settings اپڈیٹ کرنے کے لیے نیچے بٹن دبائیں۔"
+            display_name = "Open Settings"
+        else:
+            text = (
+                "Use the web page to select your Provinces, Cities, Categories, and Types "
+                "with an interactive multi-select form."
+            )
+            if change_settings:
+                text = "Press the button below to update your TenderWala settings on the web page."
+            display_name = "Open Settings"
+        return self.api.send_url_btn_msg(text, link_url, display_name)
+
+    def _send_post_web_save_followup(self, user_status):
+        status_norm = str(user_status).strip().upper()
+        self.api.user_type = status_norm
+
+        if status_norm == "TRIAL":
+            self.trial_user_func()
+            return True
+        if status_norm == "REGISTERING":
+            self._send_registration_web_link(change_settings=False)
+            return True
+        if status_norm == "PAID":
+            self.api.send_btn_msg(self.paid_user_func(), ["Change Language!"])
+            return True
+        if status_norm == "UNPAID":
+            self.api.send_btn_msg(self.unpaid_user_func(), ["Change Language!"])
+            return True
+        if status_norm == "VISITOR":
+            self.visitor_user_func()
+            return True
+        return False
+
+    def _is_filter_value_set(self, value):
+        if value is None:
+            return False
+        text = str(value).strip().lower()
+        return text not in ["", "empty", "none", "null"]
+
+    def _normalized_selection_value(self, parsed_value):
+        if isinstance(parsed_value, str) and parsed_value.strip().lower() == "all":
+            return "all"
+        if isinstance(parsed_value, list):
+            return ",".join([str(x).strip() for x in parsed_value if str(x).strip() != ""])
+        return str(parsed_value).strip()
+
+    def _send_registration_next_step_from_filter(self, filter_data):
+        name, col, _, _ = self.security_utils.cities_selection_logic(
+            filter_data,
+            self.lang.province,
+            self.filters_list[1:]
+        )
+
+        if name is not None and col is not None:
+            col_name = col[0]
+            step_msg = self.lang.choose_from_img(name[0])
+            if col_name == "categories":
+                self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", step_msg)
+            else:
+                self.api.send_document_msg_by_url("image", f"{self.img_url}{col_name}.png", step_msg)
+            return True
+
+        if not self._is_filter_value_set(filter_data[2]):
+            self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+            return True
+
+        return False
+
+    def _send_registration_next_step(self):
+        return self._send_registration_web_link(change_settings=False)
+
+    def registering_user(self,msg_text):
+        if self.lang.type == "ur":
+            self.api.send_message("رجسٹریشن اب ویب پیج کے ذریعے مکمل ہوتی ہے۔ نیچے بٹن دبا کر اپنی سیٹنگز منتخب کریں۔")
+        else:
+            self.api.send_message("Registration now happens on the web page. Use the button below to choose your settings.")
+        self._send_registration_web_link(change_settings=False)
+    
+    def benefits(self):
+        self.api.send_document_msg_by_url("image",f"https://tenderwala.thedataminds.us/media/benefits.png","")
+        
+    def trial_user_func(self):
+        self.api.send_btn_msg(self.lang.register_success,["Send Tenders","Benefits","Change Language!"])
+
+    def _set_runtime_language(self, lang_code):
+        code = str(lang_code).strip().lower()
+        if code == "ur":
+            self.lang = Urdu()
+        else:
+            self.lang = English()
+        self.lang.sender = self.api.sender
+        self.lang.user = self.api.sender_name
+        self.lang.messages()
+
+    def _resend_settings_step(self):
+        self._ensure_settings_context()
+        ctx = self.settings_edit_context.get(self.api.sender)
+        if not ctx:
+            return False
+
+        selected_col = ctx.get("col")
+        if selected_col is None:
+            self.change_settings_func()
+            return True
+
+        info = self._settings_target_info(selected_col)
+        if selected_col == "categories":
+            self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", info["step_msg"])
+            self.api.send_btn_msg(
+                "You can also choose all categories.",
+                [info["all_btn_title"], "Contact Us", "Change Language!"],
+                [info["all_btn_id"], 0, 1]
+            )
+        else:
+            self.api.send_btn_msg(
+                info["step_msg"],
+                [info["all_btn_title"], "Contact Us", "Change Language!"],
+                [info["all_btn_id"], 0, 1]
+            )
+        return True
+
+    def _resend_registration_step(self):
+        self._send_registration_web_link(change_settings=False)
+        return True
+
+    def resend_previous_step(self):
+        if self._resend_settings_step():
+            return True
+
+        user_type = str(self.api.user_type).upper() if self.api.user_type is not None else ""
+        if user_type == "REGISTERING":
+            return self._resend_registration_step()
+        if user_type == "TRIAL":
+            self.trial_user_func()
+            return True
+        if user_type == "VISITOR":
+            self.visitor_user_func()
+            return True
+        if user_type == "PAID":
+            self.api.send_btn_msg(self.paid_user_func(), ["Change Language!"])
+            return True
+        if user_type == "UNPAID":
+            self.api.send_btn_msg(self.unpaid_user_func(), ["Change Language!"])
+            return True
+        return False
+
+    def change_language(self):
+        new_lang = "en" if self.lang.type == "ur" else "ur"
+        resp = self.api.utils.change_language(self.api.sender,self.lang.type)
+        if resp[0]:
+            self._set_runtime_language(new_lang)
+            if new_lang == "en":
+                lang_msg = "Your language has been changed to English."
+            else:
+                lang_msg = "میں اب آپ سے اردو میں بات کروں گا 🤩"
+            self.api.send_message(lang_msg)
+            return [True, new_lang]
+        else:
+            self.api.send_btn_msg(str(resp[1]),["Contact Us"])
+            return [False, str(resp[1])]
+        
+# Change Settings Functions
+    def _ensure_settings_context(self):
+        if not hasattr(self, "settings_edit_context"):
+            self.settings_edit_context = {}
+
+    def _settings_target_info(self, col):
+        if col == "provinces":
+            return {
+                "items": province,
+                "step_msg": self.lang.ask_prov,
+                "all_btn_title": "All Regions",
+                "all_btn_id": "provinces",
+            }
+        if col == "types":
+            return {
+                "items": types,
+                "step_msg": self.lang.ask_types,
+                "all_btn_title": "All Types",
+                "all_btn_id": "types",
+            }
+        return {
+            "items": prov_cities["categories"]["list"],
+            "step_msg": self.lang.choose_from_img("Categories"),
+            "all_btn_title": "All Categories",
+            "all_btn_id": "categories",
+        }
+
+    def _send_settings_city_prompt(self, city_col, city_name):
+        step_msg = self.lang.choose_from_img(city_name)
+        self.api.send_document_msg_by_url(
+            "image",
+            f"{self.img_url}{city_col}.png",
+            step_msg
+        )
+
+    def _start_settings_city_flow(self):
+        filters_resp = self.api.utils.get_filters(self.api.sender)
+        if not filters_resp[0]:
+            return False
+
+        filter_data = filters_resp[1]
+        name, col, _, _ = self.security_utils.cities_selection_logic(
+            filter_data,
+            self.lang.province,
+            self.filters_list[1:]
+        )
+        if name is None or col is None:
+            return False
+
+        self.settings_edit_context[self.api.sender] = {
+            "col": "provinces",
+            "mode": "cities",
+            "city_col": col[0]
+        }
+        self._send_settings_city_prompt(col[0], name[0])
+        return True
+
+    def _get_pending_settings_city_step(self):
+        filters_resp = self.api.utils.get_filters(self.api.sender)
+        if not filters_resp[0]:
+            return None
+
+        filter_data = filters_resp[1]
+        name, col, _, _ = self.security_utils.cities_selection_logic(
+            filter_data,
+            self.lang.province,
+            self.filters_list[1:]
+        )
+        if name is None or col is None:
+            return None
+
+        return {
+            "city_name": name[0],
+            "city_col": col[0]
+        }
+
+    def _looks_like_selection_input(self, msg_text):
+        raw = str(msg_text).strip().lower()
+        if raw == "all":
+            return True
+        return bool(re.search(r"\d", raw))
+
+    def change_settings_func(self):
+        self._ensure_settings_context()
+        self.settings_edit_context.pop(self.api.sender, None)
+        self._send_registration_web_link(change_settings=True)
+
+    def handle_change_settings_selection(self, list_id, title):
+        self._ensure_settings_context()
+        map_by_id = {
+            "1": "provinces",
+            "2": "categories",
+            "3": "types"
+        }
+
+        selected_col = map_by_id.get(str(list_id).strip())
+        if selected_col is None:
+            title_text = str(title).strip().lower()
+            if "province" in title_text:
+                selected_col = "provinces"
+            elif "categor" in title_text:
+                selected_col = "categories"
+            elif "type" in title_text:
+                selected_col = "types"
+
+        if selected_col is None:
+            self.api.send_message("Invalid setting selection. Please choose Provinces, Categories, or Types.")
+            return [False, "invalid_selection"]
+
+        self.settings_edit_context[self.api.sender] = {"col": selected_col}
+        info = self._settings_target_info(selected_col)
+
+        if selected_col == "categories":
+            self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", info["step_msg"])
+            self.api.send_btn_msg(
+                "You can also choose all categories.",
+                [info["all_btn_title"], "Contact Us", "Change Language!"],
+                [info["all_btn_id"], 0, 1]
+            )
+        else:
+            self.api.send_btn_msg(
+                info["step_msg"],
+                [info["all_btn_title"], "Contact Us", "Change Language!"],
+                [info["all_btn_id"], 0, 1]
+            )
+        return [True]
+
+    def process_settings_input(self, msg_text):
+        self._ensure_settings_context()
+        ctx = self.settings_edit_context.get(self.api.sender)
+        selected_col = None if not ctx else ctx.get("col")
+
+        if (not ctx or selected_col is None) and self._looks_like_selection_input(msg_text):
+            pending_city = self._get_pending_settings_city_step()
+            if pending_city is not None:
+                ctx = self.settings_edit_context.setdefault(self.api.sender, {})
+                ctx["col"] = "provinces"
+                ctx["mode"] = "cities"
+                ctx["city_col"] = pending_city["city_col"]
+                selected_col = "provinces"
+
+        if not ctx:
+            return False
+
+        if selected_col is None:
+            return False
+
+        if ctx.get("mode") == "cities":
+            city_col = ctx.get("city_col")
+            if not city_col:
+                pending_city = self._get_pending_settings_city_step()
+                if pending_city is None:
+                    return False
+                city_col = pending_city["city_col"]
+                ctx["city_col"] = city_col
+            input_resp = self.security_utils.get_numbers_list(msg_text, prov_cities[city_col]["list"])
+            if input_resp[0]:
+                selected_value = self._normalized_selection_value(input_resp[1])
+                resp = self.api.utils.insert_into_filters(self.api.sender, city_col, selected_value, True)
+                if not resp.get("status"):
+                    resp = self.api.utils.insert_into_filters(self.api.sender, city_col, selected_value, False)
+
+                if resp.get("status"):
+                    filters_resp = self.api.utils.get_filters(self.api.sender)
+                    if filters_resp[0]:
+                        filter_data = filters_resp[1]
+                        name, col, _, _ = self.security_utils.cities_selection_logic(
+                            filter_data,
+                            self.lang.province,
+                            self.filters_list[1:]
+                        )
+                        if name is not None and col is not None:
+                            ctx["city_col"] = col[0]
+                            self._send_settings_city_prompt(col[0], name[0])
+                            return True
+
+                    self.api.send_message(self.lang.province_success)
+                    ctx["mode"] = None
+                    ctx["col"] = "types"
+                    self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                    return True
+
+                self.api.send_message("Unable to update setting right now. Please try again.")
+                return True
+
+            if input_resp[1] is None:
+                self.api.send_message(self.lang.keep_registering)
+            else:
+                self.api.send_message(self.lang.province_error + " " + str(input_resp[1]))
+            self._send_settings_city_prompt(city_col, prov_cities[city_col]["name"])
+            return True
+
+        info = self._settings_target_info(selected_col)
+        input_resp = self.security_utils.get_numbers_list(msg_text, info["items"])
+
+
+        if input_resp[0]:
+            selected_value = self._normalized_selection_value(input_resp[1])
+            resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, selected_value, True)
+            if not resp.get("status"):
+                resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, selected_value, False)
+
+            if resp.get("status"):
+                if selected_col == "provinces":
+                    self.api.utils.reset_city_filters(self.api.sender)
+                    self.api.send_message(self.lang.province_success)
+                    # Always set context to expect city input and prompt for city after province selection
+                    filters_resp = self.api.utils.get_filters(self.api.sender)
+                    if filters_resp[0]:
+                        filter_data = filters_resp[1]
+                        name, col, _, _ = self.security_utils.cities_selection_logic(
+                            filter_data,
+                            self.lang.province,
+                            self.filters_list[1:]
+                        )
+                        if name is not None and col is not None:
+                            ctx["col"] = "provinces"
+                            ctx["mode"] = "cities"
+                            ctx["city_col"] = col[0]
+                            self._send_settings_city_prompt(col[0], name[0])
+                            return True
+                    # If no cities found, skip to types
+                    ctx["col"] = "types"
+                    ctx["mode"] = None
+                    self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                    return True
+
+                self.api.send_message(self.lang.province_success)
+                self.api.send_message("Setting updated successfully.")
+                self.settings_edit_context.pop(self.api.sender, None)
+                return True
+
+            self.api.send_message("Unable to update setting right now. Please try again.")
+            return True
+
+        if input_resp[1] is None:
+            self.api.send_message(self.lang.keep_registering)
+        else:
+            self.api.send_message(self.lang.province_error + " " + str(input_resp[1]))
+
+        if selected_col == "categories":
+            self.api.send_document_msg_by_url("image", f"{self.img_url}categories.png", info["step_msg"])
+        else:
+            self.api.send_btn_msg(
+                info["step_msg"],
+                [info["all_btn_title"], "Contact Us", "Change Language!"],
+                [info["all_btn_id"], 0, 1]
+            )
+        return True
+
+    def process_settings_all_button(self, button_id):
+        self._ensure_settings_context()
+        ctx = self.settings_edit_context.get(self.api.sender)
+        if not ctx:
+            return False
+
+        selected_col = ctx.get("col")
+        if selected_col is None or str(button_id) != str(selected_col):
+            return False
+
+        resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, "all", True)
+        if not resp.get("status"):
+            resp = self.api.utils.insert_into_filters(self.api.sender, selected_col, "all", False)
+
+        if resp.get("status"):
+            if selected_col == "provinces":
+                self.api.utils.reset_city_filters(self.api.sender)
+                self.api.send_message(self.lang.province_success)
+                if self._start_settings_city_flow():
+                    return True
+                ctx["col"] = "types"
+                self.api.send_btn_msg(self.lang.ask_types, ["All Types", "Contact Us", "Change Language!"], ["types", 0, 1])
+                return True
+
+            self.api.send_message(self.lang.province_success)
+            self.api.send_message("Setting updated successfully.")
+        else:
+            self.api.send_message("Unable to update setting right now. Please try again.")
+
+        self.settings_edit_context.pop(self.api.sender, None)
+        return True
+## Change Settings Functions End
+    
+    
+    def _parse_tender_datetime(self, value):
+        if value is None:
+            return None
+        txt = str(value).strip()
+        if txt == "":
+            return None
+
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%b %d, %Y %I:%M %p",
+            "%d %b %Y",
+            "%d-%m-%Y",
+            "%Y, %m, %d, %H:%M:%S"
+        ]
+        for fmt in formats:
+            try:
+                return datetime.datetime.strptime(txt, fmt)
+            except Exception:
+                continue
+
+        try:
+            return datetime.datetime.fromisoformat(txt.replace("T", " ").replace("Z", ""))
+        except Exception:
+            return None
+
+    def _load_training_tenders(self):
+        file_path = os.path.join("files", "tenders_latest.pkl")
+        if not os.path.exists(file_path):
+            return [False, "Model file not found. Please run train_tenders.py first.", []]
+
+        try:
+            with open(file_path, "rb") as fp:
+                payload = pickle.load(fp)
+        except Exception as e:
+            return [False, f"Unable to read model file: {str(e)}", []]
+
+        if isinstance(payload, dict):
+            records = payload.get("records", [])
+            if isinstance(records, list) and len(records) > 0:
+                return [True, "", records]
+
+        table_map = payload.get("tables", {}) if isinstance(payload, dict) else {}
+        merged = []
+        for table_name, rows in table_map.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict):
+                    item = dict(row)
+                    item["table"] = table_name
+                    title = str(item.get("title", "")).strip()
+                    category = str(item.get("category", "")).strip()
+                    city = str(item.get("city", "")).strip()
+                    department = str(item.get("department", "")).strip()
+                    tender_type = str(item.get("type", "")).strip()
+                    province_name = str(table_name).replace("_table", "").replace("_", " ").title()
+                    item["province_name"] = province_name
+                    item["search_text"] = " | ".join([
+                        title,
+                        category,
+                        city,
+                        department,
+                        tender_type,
+                        province_name
+                    ]).strip(" |")
+                    merged.append(item)
+        return [True, "", merged]
+
+    def _openai_config(self):
+        openai_key = ""
+        key_file = os.path.join("files", "openai.txt")
+        if os.path.exists(key_file):
+            try:
+                with open(key_file, "r", encoding="utf-8", errors="ignore") as fp:
+                    openai_key = str(fp.read()).strip()
+            except Exception:
+                openai_key = ""
+
+        if openai_key == "":
+            openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if openai_key == "":
+            openai_key = str(HARDCODED_OPENAI_API_KEY).strip()
+
+        model = str(HARDCODED_OPENAI_MODEL).strip()
+        if model == "":
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+
+        return openai_key, model
+
+    def _looks_like_tender_search_query(self, query_text):
+        query = str(query_text).strip()
+        if query == "":
+            return [False, query]
+
+        low = query.lower()
+        if low in [
+            "hi", "hello", "hey", "assalam o alaikum", "assalamualaikum",
+            "salam", "ok", "thanks", "thank you", "payment done", "contact us",
+            "send tenders", "change settings", "change language", "benefits",
+            "free demo", "get old tenders"
+        ] or len(low) < 5:
+            return [False, query]
+
+        openai_key, model = self._openai_config()
+        if openai_key != "":
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Classify whether a WhatsApp user message is asking to find, send, show, or search tenders. "
+                            "Return strict JSON only with keys: is_tender_search, search_query. "
+                            "Set is_tender_search true only when the user clearly wants tender discovery or matching. "
+                            "For greetings, payment updates, settings, language changes, help, or casual chat, return false. "
+                            "search_query should be the cleaned tender search request."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Message: {query}"
+                    }
+                ],
+                "temperature": 0
+            }
+            headers = {
+                "Authorization": f"Bearer {openai_key}",
+                "Content-Type": "application/json"
+            }
+            try:
+                resp = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                )
+                if resp.status_code == 200:
+                    content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    start = content.find("{")
+                    end = content.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        parsed = json.loads(content[start:end + 1])
+                        is_search = bool(parsed.get("is_tender_search"))
+                        cleaned = str(parsed.get("search_query", query)).strip() or query
+                        return [is_search, cleaned]
+            except Exception:
+                pass
+
+        keyword_matches = [
+            "tender", "tenders", "bid", "bids", "procurement", "ppra",
+            "send tenders", "show tenders", "find tenders", "search tenders"
+        ]
+        return [any(token in low for token in keyword_matches), query]
+
+    def _rank_training_tenders(self, query, tenders, limit=120):
+        words = [w for w in re.findall(r"[a-zA-Z0-9]+", str(query).lower()) if len(w) > 2]
+        ranked = []
+
+        for tender in tenders:
+            title = str(tender.get("title", "")).lower()
+            dept = str(tender.get("department", "")).lower()
+            cat = str(tender.get("category", "")).lower()
+            city = str(tender.get("city", "")).lower()
+            search_text = str(tender.get("search_text", "")).lower()
+            text = " ".join([title, dept, cat, city, search_text])
+
+            score = 0
+            for w in words:
+                if w in title:
+                    score += 5
+                elif w in dept:
+                    score += 4
+                elif w in cat:
+                    score += 3
+                elif w in city:
+                    score += 3
+                elif w in text:
+                    score += 1
+
+            date_score = self._parse_tender_datetime(tender.get("date_published"))
+            if date_score is None:
+                date_score = self._parse_tender_datetime(tender.get("date_opening"))
+            ranked.append((score, date_score, tender))
+
+        ranked.sort(key=lambda x: (x[0], x[1] or datetime.datetime.min), reverse=True)
+        top = [x[2] for x in ranked[:limit] if x[0] > 0]
+        if len(top) > 0:
+            return top
+
+        recents = sorted(
+            tenders,
+            key=lambda t: self._parse_tender_datetime(t.get("date_published"))
+            or self._parse_tender_datetime(t.get("date_opening"))
+            or datetime.datetime.min,
+            reverse=True,
+        )
+        return recents[:min(limit, 25)]
+
+    def _fallback_relevant_tenders(self, query, tenders):
+        words = [w for w in re.findall(r"[a-zA-Z0-9]+", str(query).lower()) if len(w) > 2]
+        ranked = []
+
+        for tender in tenders:
+            title = str(tender.get("title", "")).lower()
+            dept = str(tender.get("department", "")).lower()
+            cat = str(tender.get("category", "")).lower()
+            city = str(tender.get("city", "")).lower()
+            text = " ".join([title, dept, cat, city])
+
+            score = 0
+            for w in words:
+                if w in title:
+                    score += 4
+                elif w in dept:
+                    score += 3
+                elif w in cat:
+                    score += 2
+                elif w in city:
+                    score += 1
+                elif w in text:
+                    score += 1
+
+            date_score = self._parse_tender_datetime(tender.get("date_published"))
+            if date_score is None:
+                date_score = self._parse_tender_datetime(tender.get("date_opening"))
+            ranked.append((score, date_score, tender))
+
+        ranked.sort(key=lambda x: (x[0], x[1] or datetime.datetime.min), reverse=True)
+        top = [x[2] for x in ranked[:5] if x[0] > 0]
+
+        if len(top) == 0:
+            recents = sorted(
+                tenders,
+                key=lambda t: self._parse_tender_datetime(t.get("date_published"))
+                or self._parse_tender_datetime(t.get("date_opening"))
+                or datetime.datetime.min,
+                reverse=True,
+            )
+            top = recents[:5]
+        return top
+
+    def _format_tender_summary_list(self, tenders):
+        lines = ["Latest relevant tenders:"]
+        idx = 1
+        for tender in tenders:
+            line = (
+                f"{idx}. {str(tender.get('title', 'Untitled'))}"
+                + f" | Dept: {str(tender.get('department', 'N/A'))}"
+                + f" | City: {str(tender.get('city', 'N/A'))}"
+                + f" | Category: {str(tender.get('category', 'N/A'))}"
+                + f" | Open: {str(tender.get('date_opening', 'N/A'))}"
+                + f" | Ref: {str(tender.get('id', 'N/A'))} ({str(tender.get('table', 'N/A'))})"
+            )
+            lines.append(line)
+            idx += 1
+        return "\n".join(lines)
+
+    def try_auto_tender_search(self, query_text):
+        detect_resp = self._looks_like_tender_search_query(query_text)
+        if not detect_resp[0]:
+            return [False, "not_tender_search"]
+        search_query = str(detect_resp[1]).strip() or str(query_text).strip()
+        search_resp = self.direct_ask(search_query)
+        status_text = search_resp[1] if isinstance(search_resp, list) and len(search_resp) > 1 else ""
+        return [True, status_text]
+
+    def direct_ask(self, query_text):
+        query = str(query_text).strip()
+        if query == "":
+            self.api.send_message("Please send your tender requirement.")
+            return [False, "empty_query"]
+
+        data_resp = self._load_training_tenders()
+        if not data_resp[0]:
+            self.api.send_message(data_resp[1])
+            return [False, data_resp[1]]
+
+        tenders = data_resp[2]
+        if len(tenders) == 0:
+            self.api.send_message("No tenders found in model file. Please refresh training data.")
+            return [False, "no_tenders"]
+
+        tenders = self._rank_training_tenders(query, tenders, limit=120)
+
+        openai_key, model = self._openai_config()
+        if openai_key != "":
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a tender assistant. Return max 5 latest relevant tenders in concise WhatsApp style. "
+                            "Include title, department, city, category, opening date, and tender reference (id/table). "
+                            "If nothing is clearly relevant, say that no strong tender match was found."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"User query: {query}\n"
+                            + "Tenders JSON: "
+                            + json.dumps(tenders, ensure_ascii=False)[:18000]
+                        )
+                    }
+                ],
+                "temperature": 0.2
+            }
+            headers = {
+                "Authorization": f"Bearer {openai_key}",
+                "Content-Type": "application/json"
+            }
+            try:
+                resp = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=60
+                )
+                if resp.status_code == 200:
+                    answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    if answer != "":
+                        self.api.send_message(answer[:3200])
+                        return [True]
+            except Exception:
+                pass
+
+        # Fallback ranking if OpenAI key is missing or request fails.
+        selected = self._fallback_relevant_tenders(query, tenders)
+        if len(selected) == 0:
+            self.api.send_message("I could not find relevant tenders for your query right now.")
+            return [False, "no_match"]
+
+        self.api.send_message(self._format_tender_summary_list(selected)[:3200])
+        return [True]
+
+    def register_step_btn_resp(self,button_id):
+        col = button_id
+        
+        if col == "provinces":
+            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
+            if resp.get("status"):
+                self.api.send_message(self.lang.province_success)
+                self._send_registration_next_step()
+            else:
+                self.api.send_message("Unable to save your region right now. Please try again.")
+            return
+
+        if col == "types":
+            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", True)
+            if not resp.get("status"):
+                resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
+
+            if resp.get("status"):
+                self.api.send_message(self.lang.province_success)
+                self.api.send_btn_msg(self.lang.register_success, ["Send Tenders", "Contact Us", "Change Language!"])
+                self.api.utils.update_user_status(self.api.sender, "TRIAL")
+            else:
+                self.api.send_message("Unable to save contract type right now. Please try again.")
+            return
+
+        resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", True)
+        if not resp.get("status"):
+            resp = self.api.utils.insert_into_filters(self.api.sender, col, "all", False)
+
+        if resp.get("status"):
+            self.api.send_message(self.lang.province_success)
+            self._send_registration_next_step()
+        else:
+            self.api.send_message("Unable to save your selection right now. Please try again.")
+    def _parse_sent_to_list(self, raw_value):
+        if raw_value is None:
+            return []
+        text = str(raw_value).strip()
+        if text == "" or text.lower() == "none":
+            return []
+        values = []
+        for token in text.split(","):
+            phone = str(token).strip()
+            if phone != "" and phone not in values:
+                values.append(phone)
+        return values
+
+    def _notify_admin_send_tenders(self, stage, cron=False, old=False, result=None, error_text=""):
+        requester_name = str(self.api.sender_name).strip() if self.api.sender_name else "Customer"
+        requester_phone = str(self.api.sender).strip() if self.api.sender else "Unknown"
+        trigger_type = "cron" if cron else "user"
+        request_type = "old tenders" if old else "latest tenders"
+
+        if stage == "started":
+            msg = (
+                "Send Tenders request received\n"
+                + f"Trigger: {trigger_type}\n"
+                + f"Request: {request_type}\n"
+                + f"Name: {requester_name}\n"
+                + f"Number: {requester_phone}"
+            )
+        elif stage == "completed" and isinstance(result, dict):
+            msg = (
+                "Send Tenders request completed\n"
+                + f"Trigger: {trigger_type}\n"
+                + f"Request: {request_type}\n"
+                + f"Name: {requester_name}\n"
+                + f"Number: {requester_phone}\n"
+                + f"Sent: {int(result.get('sent', 0))}\n"
+                + f"Not selected: {int(result.get('not_selected', 0))}\n"
+                + f"Already sent: {int(result.get('already_sent_count', 0))}\n"
+                + f"Send failed: {int(result.get('send_failed', 0))}"
+            )
+        else:
+            msg = (
+                "Send Tenders request failed\n"
+                + f"Trigger: {trigger_type}\n"
+                + f"Request: {request_type}\n"
+                + f"Name: {requester_name}\n"
+                + f"Number: {requester_phone}\n"
+                + f"Error: {error_text}"
+            )
+
+        admin_api = metaWhatsappAPI()
+        admin_api.sender = ADMIN_PHONE
+        admin_api.send_message(msg[:3200])
+
+    def _send_tender_progress_message(self, result, old=False):
+        if not old:
+            self.api.send_btn_msg(
+                "Want to update your tender preferences?",
+                ["Change Settings"],
+                ["change_settings"]
+            )
+            return
+
+        request_type = "old tenders" if old else "latest tenders"
+        msg = (
+            "🔰 *Progress Report* 🔰\n"
+            + f"🫆*Request Type*: {request_type}\n"
+            + f"✅*Tenders Sent*: {int(result.get('sent', 0))}\n"
+            + f"🔍*Not Selected*: {int(result.get('not_selected', 0))}\n"
+            + f"🤔*Already Sent earlier*: {int(result.get('already_sent_count', 0))}\n"
+            + f"☹️*Sending Failed*: {int(result.get('send_failed', 0))}"
+        )
+        self.api.send_message(msg[:3200])
+
+    def _normalize_match_text(self, *parts):
+        merged = " ".join([str(part).strip().lower() for part in parts if str(part).strip() != ""])
+        merged = re.sub(r"[^a-z0-9]+", " ", merged)
+        return re.sub(r"\s+", " ", merged).strip()
+
+    def _build_keyword_terms(self, category_name, extra_terms=None):
+        stop_words = {
+            "and", "or", "of", "the", "for", "with", "to", "in", "on",
+            "general", "miscellaneous"
+        }
+        terms = []
+        base_name = self._normalize_match_text(category_name)
+        if base_name != "":
+            terms.append(base_name)
+        for token in base_name.split():
+            if len(token) <= 2 and token != "it":
+                continue
+            if token in stop_words:
+                continue
+            terms.append(token)
+        for item in extra_terms or []:
+            normalized = self._normalize_match_text(item)
+            if normalized != "":
+                terms.append(normalized)
+
+        deduped = []
+        for term in terms:
+            if term not in deduped:
+                deduped.append(term)
+        return deduped
+
+    def _category_keyword_profiles(self):
+        if hasattr(self, "_category_keyword_profiles_cache"):
+            return self._category_keyword_profiles_cache
+
+        profiles = {
+            "construction & civil work": self._build_keyword_terms(
+                "construction & civil work",
+                [
+                    "construction", "civil work", "civil", "road", "street", "drain",
+                    "sewerage", "building", "boundary wall", "rehabilitation",
+                    "renovation", "repair", "infrastructure", "bridge", "pavement"
+                ]
+            ),
+            "it & technology": self._build_keyword_terms(
+                "it & technology",
+                [
+                    "it", "technology", "software", "hardware", "computer", "desktop",
+                    "laptop", "printer", "scanner", "server", "storage", "network",
+                    "networking", "cctv", "surveillance", "application", "website",
+                    "web portal", "portal", "erp", "database", "digital", "biometric",
+                    "firewall", "fiber", "fiber optic", "cloud", "cyber"
+                ]
+            ),
+            "general store & stationary": self._build_keyword_terms(
+                "general store & stationary",
+                [
+                    "general store", "stationary", "stationery", "office supplies",
+                    "office supply", "consumables", "toner", "cartridge", "paper",
+                    "register", "file cover", "photocopier paper"
+                ]
+            ),
+            "medical & healthcare & medicine": self._build_keyword_terms(
+                "medical & healthcare & medicine",
+                [
+                    "medical", "healthcare", "medicine", "medicines", "drug",
+                    "drugs", "pharmaceutical", "hospital", "surgical", "lab",
+                    "laboratory", "lab kit", "reagent", "diagnostic", "x ray",
+                    "ct scan", "mri", "oxygen", "ventilator", "dental", "pathology"
+                ]
+            ),
+            "electrical & mechanical": self._build_keyword_terms(
+                "electrical & mechanical",
+                [
+                    "electrical", "electric", "mechanical", "generator", "transformer",
+                    "motor", "pump", "compressor", "machinery", "hvac", "wiring",
+                    "cable", "ups", "switchgear", "solar"
+                ]
+            ),
+            "vehical & transport": self._build_keyword_terms(
+                "vehical & transport",
+                [
+                    "vehical", "vehicle", "transport", "car", "bus", "truck",
+                    "pickup", "van", "ambulance", "tractor", "motorcycle", "bike",
+                    "loader"
+                ]
+            ),
+            "food & catering": self._build_keyword_terms(
+                "food & catering",
+                [
+                    "food", "catering", "meal", "meals", "ration", "grocery",
+                    "groceries", "wheat", "rice", "kitchen", "mess", "canteen",
+                    "refreshment"
+                ]
+            ),
+            "cleaning & maintance": self._build_keyword_terms(
+                "cleaning & maintance",
+                [
+                    "cleaning", "maintance", "maintenance", "janitorial", "sanitation",
+                    "housekeeping", "sweeping", "waste collection", "garbage"
+                ]
+            ),
+            "education & training": self._build_keyword_terms(
+                "education & training",
+                [
+                    "education", "training", "workshop", "seminar", "course",
+                    "learning", "school", "classroom", "capacity building"
+                ]
+            ),
+            "security services": self._build_keyword_terms(
+                "security services",
+                [
+                    "security", "guard", "guards", "guarding", "watchman",
+                    "protection", "safety"
+                ]
+            ),
+            "concultancy & professional services": self._build_keyword_terms(
+                "concultancy & professional services",
+                [
+                    "concultancy", "consultancy", "consultant", "advisory",
+                    "professional services", "audit", "legal", "architect",
+                    "engineering consultant", "feasibility study"
+                ]
+            ),
+            "telecom & communication": self._build_keyword_terms(
+                "telecom & communication",
+                [
+                    "telecom", "communication", "internet", "bandwidth", "telephone",
+                    "voip", "fiber optic", "wireless", "radio", "ptcl"
+                ]
+            ),
+            "energy & peteroleum": self._build_keyword_terms(
+                "energy & peteroleum",
+                [
+                    "energy", "peteroleum", "petroleum", "fuel", "diesel", "petrol",
+                    "gas", "furnace oil", "lpg", "cng", "solar"
+                ]
+            ),
+            "agriculture & livestock": self._build_keyword_terms(
+                "agriculture & livestock",
+                [
+                    "agriculture", "agricultural", "livestock", "fertilizer", "seed",
+                    "pesticide", "irrigation", "farm", "dairy", "poultry", "animal",
+                    "cattle", "veterinary"
+                ]
+            ),
+            "miscellaneous supplies": self._build_keyword_terms(
+                "miscellaneous supplies",
+                [
+                    "miscellaneous", "supplies", "assorted", "various items",
+                    "general items", "supply items", "store items"
+                ]
+            ),
+            "tender notice": self._build_keyword_terms(
+                "tender notice",
+                [
+                    "tender notice", "corrigendum", "expression of interest", "eoi",
+                    "prequalification", "pre qualification", "rfp", "rfq", "quotation"
+                ]
+            ),
+            "services": self._build_keyword_terms(
+                "services",
+                [
+                    "service", "services", "outsourcing", "operation", "operations",
+                    "facility management", "hiring services", "maintenance service"
+                ]
+            )
+        }
+        self._category_keyword_profiles_cache = profiles
+        return profiles
+
+    def _type_keyword_profiles(self):
+        return {
+            "goods": ["goods", "supply", "supplies", "purchase", "equipment", "items", "material", "store"],
+            "works": ["work", "works", "construction", "repair", "rehabilitation", "renovation", "development", "installation"],
+            "services": ["service", "services", "consultancy", "outsourcing", "operation", "maintenance service", "hiring"]
+        }
+
+    def _match_keyword_profile(self, search_text, keyword_terms):
+        if len(keyword_terms) == 0:
+            return False
+        padded_text = f" {search_text} "
+        for term in keyword_terms:
+            normalized_term = self._normalize_match_text(term)
+            if normalized_term == "":
+                continue
+            if f" {normalized_term} " in padded_text:
+                return True
+        return False
+
+    def _resolve_selected_categories(self, filters):
+        raw_categories = filters[-1] if len(filters) > 0 else None
+        if not self._is_filter_value_set(raw_categories):
+            return []
+        return [
+            str(cat).strip().lower()
+            for cat in self.security_utils.map_list(str(raw_categories), prov_cities["categories"]["list"])
+        ]
+
+    def _resolve_selected_types(self, filters):
+        raw_types = filters[2] if len(filters) > 2 else None
+        if not self._is_filter_value_set(raw_types):
+            return []
+        return [
+            str(type_name).strip().lower()
+            for type_name in self.security_utils.map_list(str(raw_types), types)
+        ]
+
+    def _resolve_selected_tables(self, filters, old=False, old_table=None):
+        old_table = old_table or []
+        normalized_old_targets = []
+        name_to_prefix = {
+            "punjab": "punjab",
+            "sindh": "sindh",
+            "kpk": "kpk",
+            "ajk": "ajk",
+            "balochistan": "balochistan",
+            "gilgit": "gilgit",
+            "federal": "federal"
+        }
+        for item in old_table:
+            text = str(item).strip().lower()
+            if text in name_to_prefix:
+                normalized_old_targets.append(name_to_prefix[text])
+            elif text.endswith("_table"):
+                normalized_old_targets.append(text.split("_")[0])
+            else:
+                normalized_old_targets.append(text)
+
+        selected = []
+        provinces_raw = str(filters[1]).replace(" ", "") if len(filters) > 1 and filters[1] is not None else ""
+        for prov_i in [p for p in provinces_raw.split(",") if p != ""]:
+            for table_name in prov_indexes.get(prov_i, []):
+                if old and table_name.split("_")[0] not in normalized_old_targets and table_name not in normalized_old_targets:
+                    continue
+                selected.append(table_name)
+        return selected
+
+    def _resolve_table_context(self, filters, table_name):
+        table_key = table_name.split("_")[0]
+        city_col = f"{table_key}_cities"
+        if city_col == "federal_cities":
+            return {
+                "province_name": "Federal",
+                "city_col": city_col,
+                "cities": []
+            }
+
+        city_info = prov_cities.get(city_col)
+        if city_info is None:
+            return None
+
+        city_value = filters[city_info["col_index"]] if len(filters) > city_info["col_index"] else None
+        if not self._is_filter_value_set(city_value):
+            return None
+
+        selected_cities = [
+            str(city).strip().lower()
+            for city in self.security_utils.map_list(city_value, city_info["list"])
+        ]
+        return {
+            "province_name": city_info["name"],
+            "city_col": city_col,
+            "cities": selected_cities
+        }
+
+    def _tender_matches_filters(self, tender, table_context, selected_categories, selected_types):
+        tender_title = str(tender[1]).strip().lower() if len(tender) > 1 and tender[1] is not None else ""
+        tender_department = str(tender[2]).strip().lower() if len(tender) > 2 and tender[2] is not None else ""
+        tender_city = str(tender[6]).strip().lower() if len(tender) > 6 and tender[6] is not None else ""
+        tender_category = str(tender[7]).strip().lower() if len(tender) > 7 and tender[7] is not None else ""
+        tender_type = str(tender[8]).strip().lower() if len(tender) > 8 and tender[8] is not None else ""
+        search_text = self._normalize_match_text(
+            tender_title,
+            tender_department,
+            tender_city,
+            tender_category,
+            tender_type
+        )
+
+        category_match = (
+            len(selected_categories) == 0
+            or any(
+                self._match_keyword_profile(
+                    search_text,
+                    self._category_keyword_profiles().get(
+                        str(category_name).strip().lower(),
+                        self._build_keyword_terms(category_name)
+                    )
+                )
+                for category_name in selected_categories
+            )
+        )
+        if not category_match:
+            return False
+
+        type_match = (
+            len(selected_types) == 0
+            or any(
+                self._match_keyword_profile(
+                    search_text,
+                    self._type_keyword_profiles().get(
+                        str(type_name).strip().lower(),
+                        self._build_keyword_terms(type_name)
+                    )
+                )
+                for type_name in selected_types
+            )
+        )
+        if not type_match:
+            return False
+
+        if table_context["city_col"] == "federal_cities":
+            return True
+
+        if tender_city == "":
+            return False
+
+        return any(
+            city in tender_city or tender_city in city
+            for city in table_context["cities"]
+        )
+
+    def _build_tender_note(self, table_context, table_name, tender):
+        try:
+            days_text = str(self.security_utils.days_to_open(table_context["city_col"], tender[5]))
+            if table_name == "sindh_table":
+                return f"Estimate Amount of Tender is {tender[-2]}\nOnly *{days_text} day(s) in opening"
+            return f"Only *{days_text} day(s) in opening"
+        except Exception:
+            if table_name == "sindh_table":
+                return f"Estimate Amount of Tender is {tender[-2]}"
+            return "Opening date info is not available."
+
+    def _tender_button_payloads(self, tender, table_name):
+        return [
+            f"{tender[0]}&&{table_name}&&0",
+            f"{tender[0]}&&{table_name}&&1",
+            f"{tender[0]}&&{table_name}&&2"
+        ]
+
+    def _deliver_single_tender(self, table_name, table_context, tender, mark_sent=True, use_template=False):
+        note = self._build_tender_note(table_context, table_name, tender)
+        data = [tender[1], tender[4], tender[5], tender[2], tender[6], note]
+        if use_template:
+            sent_ok = self.api.send_template_msg(
+                "send_tenders",
+                body_params=data,
+                button_payloads=self._tender_button_payloads(tender, table_name)
+            )
+        else:
+            msg = self.lang.tender_msg(table_context["province_name"], data)
+            sent_ok = self.api.send_btn_msg(
+                msg,
+                ["Bid Documents", "Tender Summary (AI)", "Remind Me!"],
+                self._tender_button_payloads(tender, table_name)
+            )
+        if not sent_ok:
+            return False
+
+        if mark_sent:
+            sent_to_list = self._parse_sent_to_list(tender[-1] if len(tender) > 0 else None)
+            if self.api.sender not in sent_to_list:
+                sent_to_list.append(self.api.sender)
+                sent_to_value = ",".join(sent_to_list) if len(sent_to_list) > 0 else "None"
+                self.api.utils.update_tenders_sent_to(table_name, sent_to_value, tender[0])
+        return True
+
+    def _split_document_links(self, doc_ref):
+        raw = str(doc_ref or "").strip()
+        if raw == "" or raw.lower() in ["none", "null", "n/a"]:
+            return []
+
+        links = []
+        seen = set()
+        for part in re.split(r"\s*,\s*|\s*\n+\s*", raw):
+            candidate = str(part).strip().strip(",")
+            if candidate == "":
+                continue
+            if not re.match(r"^https?://", candidate, flags=re.IGNORECASE):
+                continue
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append(candidate)
+        return links
+
+    def _build_document_links_message(self, doc_ref, label="Bid document link"):
+        links = self._split_document_links(doc_ref)
+        if len(links) == 0:
+            return ""
+        if len(links) == 1:
+            return f"{label}:\n{links[0]}"
+
+        lines = [f"{label}s:"]
+        for idx, link in enumerate(links, start=1):
+            lines.append(f"{idx}) {link}")
+        return "\n".join(lines)
+
+    def _send_tenders_inner(self, old=False, old_table=None, limit=None, use_template=False):
+        filters_resp = self.api.utils.get_filters(self.api.sender)
+        if not filters_resp[0]:
+            return [False, "Your settings are incomplete. Please use Change Settings to select your preferences first."]
+
+        filters = filters_resp[1]
+        selected_categories = self._resolve_selected_categories(filters)
+        selected_types = self._resolve_selected_types(filters)
+        selected_tables = self._resolve_selected_tables(filters, old=old, old_table=old_table)
+        if len(selected_tables) == 0:
+            return [False, "No province is selected in your settings."]
+
+        result = {
+            "sent": 0,
+            "not_selected": 0,
+            "already_sent_count": 0,
+            "already_sent": [],
+            "not_available": [],
+            "matched_tables": [],
+            "send_failed": 0,
+            "remaining": 0,
+            "has_more": False
+        }
+
+        for table_name in selected_tables:
+            table_context = self._resolve_table_context(filters, table_name)
+            if table_context is None:
+                continue
+
+            tenders_resp = self.api.utils.get_tenders(table_name, None)
+            if not tenders_resp[0]:
+                result["not_available"].append(table_context["province_name"])
+                continue
+
+            sent_for_table = 0
+            matched_for_table = False
+            unsent_found_for_table = False
+            for tender in tenders_resp[1]:
+                if not self._tender_matches_filters(tender, table_context, selected_categories, selected_types):
+                    result["not_selected"] += 1
+                    continue
+                matched_for_table = True
+
+                sent_to_list = self._parse_sent_to_list(tender[-1] if len(tender) > 0 else None)
+                if not old and self.api.sender in sent_to_list:
+                    result["already_sent_count"] += 1
+                    continue
+
+                unsent_found_for_table = True
+
+                if limit is not None and result["sent"] >= limit:
+                    result["remaining"] += 1
+                    result["has_more"] = True
+                    continue
+
+                delivered = self._deliver_single_tender(
+                    table_name,
+                    table_context,
+                    tender,
+                    mark_sent=not old,
+                    use_template=use_template
+                )
+                if delivered:
+                    sent_for_table += 1
+                    result["sent"] += 1
+                    if old and sent_for_table >= 5:
+                        break
+                else:
+                    result["send_failed"] += 1
+
+            if matched_for_table:
+                result["matched_tables"].append(table_context["province_name"])
+            if not old and matched_for_table and sent_for_table == 0 and not unsent_found_for_table:
+                result["already_sent"].append(table_context["province_name"])
+
+        return [True, result]
+
+    def _send_tender_followups(self, result, old=False):
+        if not old and result.get("has_more"):
+            remaining_tenders = int(result.get("remaining", 0))
+            self.api.send_btn_msg(
+                f"I have more {remaining_tenders} remaining tenders for you. want to get more?",
+                ["Send Tenders"],
+                ["send_more_tenders"]
+            )
+        if not old and len(result["already_sent"]) > 0:
+            txt = "✅" + "\n✅".join(result["already_sent"])
+            self.api.send_btn_msg(
+                self.lang.all_tenders_already_sent(txt),
+                ["Get Old Tenders", "Change Settings", "Change Language!"],
+                [",".join(result["already_sent"]), "0", "1"]
+            )
+        if len(result["not_available"]) > 0:
+            txt = "⚠️" + "\n⚠️".join(result["not_available"])
+            self.api.send_btn_msg(
+                self.lang.no_tender_available_msg(txt),
+                ["Change Settings", "Change Language!"]
+            )
+
+    def send_tenders(self, cron=False, old=False, old_table=None, run_async=None, limit_override=None, use_template_override=None):
+        def _execute_request():
+            try:
+                self._notify_admin_send_tenders("started", cron=cron, old=old)
+                limit_value = limit_override
+                if limit_value is None:
+                    limit_value = 5 if cron and not old else (10 if not cron and not old else None)
+
+                use_template_value = use_template_override
+                if use_template_value is None:
+                    use_template_value = bool(cron and not old)
+
+                resp = self._send_tenders_inner(
+                    old=old,
+                    old_table=old_table,
+                    limit=limit_value,
+                    use_template=use_template_value
+                )
+                if not resp[0]:
+                    self._notify_admin_send_tenders("failed", cron=cron, old=old, error_text=str(resp[1]))
+                    if not cron:
+                        self.api.send_message(str(resp[1])[:3200])
+                        # pass
+                    return resp
+
+                result = resp[1]
+                if not cron:
+                    self._send_tender_progress_message(result, old=old)
+                    self._send_tender_followups(result, old=old)
+                    if result["sent"] == 0 and len(result["not_available"]) == 0 and len(result["already_sent"]) == 0:
+                        self.api.send_message("No matching tenders are available for your current settings right now.")
+
+                self._notify_admin_send_tenders("completed", cron=cron, old=old, result=result)
+                return [True, result]
+            except Exception as e:
+                self._notify_admin_send_tenders("failed", cron=cron, old=old, error_text=str(e))
+                if not cron:
+                    self.api.send_message(f"Unable to process tender request right now. Error: {str(e)[:500]}")
+                return [False, str(e)]
+
+        old_table = old_table or []
+        # Keep execution synchronous so webhook-triggered sends complete reliably.
+        run_async = False
+        return _execute_request()
+    def send_demo_tenders(self,limit=10):
+        table_map = {
+            "federal_table": ("Federal", "federal_cities"),
+            "punjab_table": ("Punjab", "punjab_cities"),
+            "sindh_table": ("Sindh", "sindh_cities"),
+            "kpk_table": ("KPK", "kpk_cities"),
+            "ajk_table": ("AJK", "ajk_cities"),
+            "gilgit_table": ("Gilgit", "gilgit_cities"),
+            "balochistan_table": ("Balochistan", "balochistan_cities")
+        }
+        sent_count = 0
+        for table, table_meta in table_map.items():
+            tenders = self.api.utils.get_tenders(table,None)
+            if not tenders[0]:
+                continue
+            prov_name, days_key = table_meta
+            for tender in tenders[1]:
+                if sent_count >= limit:
+                    return sent_count
+                try:
+                    if self.security_utils.check_expiry(str(tender[5]),table=table):
+                        continue
+                    if table == "sindh_table":
+                        note = f"Estimate Amount of Tender is {tender[-2]}\nOnly *{str(self.security_utils.days_to_open(days_key,tender[5]))} day(s) in opening"
+                    else:
+                        note = f"Only *{str(self.security_utils.days_to_open(days_key,tender[5]))} day(s) in opening"
+                    data = [tender[1],tender[4],tender[5],tender[2],tender[6],note]
+                    msg = self.lang.tender_msg(prov_name,data)
+                    self.api.send_btn_msg(msg,["Bid Documents","Tender Summary (AI)","Remind Me!"],[f"{tender[0]}&&{table}&&0",f"{tender[0]}&&{table}&&1",f"{tender[0]}&&{table}&&2"])
+                    sent_count += 1
+                except Exception:
+                    continue
+        return sent_count
+    def download_bid_docs(self,tender_id,table):
+        resp = self.api.utils.get_tenders(table,["document"],["id"],[tender_id])
+        if resp[0]:
+            doc_link = resp[1][0][0]
+            if table == "punjab_table":
+                link_text = self._build_document_links_message(doc_link, label="Punjab bid document link")
+                if link_text == "":
+                    self.api.send_message("Punjab bid document link is not available right now.")
+                else:
+                    self.api.send_message(link_text)
+            elif table in ["sindh_table","kpk_table"]:
+                portal_scraper = Sindh_Scrapper(self.security_utils) if table == "sindh_table" else KPK_Scrapper(self.security_utils)
+                resp = portal_scraper.get_doc(doc_link)
+                if resp[0]:
+                    self.api.send_document_msg_by_url(type_="document",url=f"https://tenderwala.thedataminds.us/tenderdocs/{resp[1]}",filename=f"Tenderwala-{str(resp[1])}")
+                else:
+                    label = "Sindh" if table == "sindh_table" else "KPK"
+                    self.api.send_message(f"Download link for this {label} tender is not available right now. Info: {str(resp[1])}")
+            else:
+                try:
+                    self.api.send_document_msg_by_url(type_="document",url=doc_link,filename=f"Tenderwala-{str(doc_link).split('/')[-1]}")
+                except Exception as e:
+                    self.api.send_message(f"Doc link: {str(doc_link)}\n{e}")
+        else:
+            self.api.send_message(f"Download link for this tender is not available. Table: {table} Info: {str(resp[1])}")
+    def _summary_month_key(self):
+        return datetime.datetime.now().strftime("%Y-%m")
+
+    def _get_ai_summary_usage(self, phone):
+        month_key = self._summary_month_key()
+
+        monthly_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["id", "used_count"],
+            "ops": "SELECT",
+            "where": ["phone", "month_key"],
+            "value": [phone, month_key]
+        }
+        monthly_resp = db_execute(monthly_payload)
+        if monthly_resp.get("status"):
+            monthly_rows = monthly_resp.get("data", [])
+            if len(monthly_rows) > 0:
+                best_row = monthly_rows[0]
+                best_count = 0
+                for row in monthly_rows:
+                    try:
+                        count = int(row[1])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                        best_row = row
+                return [True, best_count, best_row[0] if len(best_row) > 0 else None]
+        else:
+            # Fallback to avoid failing on schema mismatch for monthly query.
+            monthly_resp = {"status": False, "message": str(monthly_resp)}
+
+        # Fallback: query without id column for monthly tracking.
+        monthly_no_id_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["used_count"],
+            "ops": "SELECT",
+            "where": ["phone", "month_key"],
+            "value": [phone, month_key]
+        }
+        monthly_no_id_resp = db_execute(monthly_no_id_payload)
+        if monthly_no_id_resp.get("status"):
+            monthly_rows = monthly_no_id_resp.get("data", [])
+            if len(monthly_rows) > 0:
+                best_count = 0
+                for row in monthly_rows:
+                    try:
+                        count = int(row[0])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                return [True, best_count, None]
+
+        # Legacy fallback: some deployments track a single counter per phone.
+        legacy_with_id_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["id", "used_count"],
+            "ops": "SELECT",
+            "where": ["phone"],
+            "value": [phone]
+        }
+        legacy_with_id_resp = db_execute(legacy_with_id_payload)
+        if legacy_with_id_resp.get("status"):
+            rows = legacy_with_id_resp.get("data", [])
+            if len(rows) > 0:
+                best_row = rows[0]
+                best_count = 0
+                for row in rows:
+                    try:
+                        count = int(row[1])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                        best_row = row
+                return [True, best_count, best_row[0] if len(best_row) > 0 else None]
+
+        legacy_no_id_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["used_count"],
+            "ops": "SELECT",
+            "where": ["phone"],
+            "value": [phone]
+        }
+        legacy_no_id_resp = db_execute(legacy_no_id_payload)
+        if legacy_no_id_resp.get("status"):
+            rows = legacy_no_id_resp.get("data", [])
+            if len(rows) > 0:
+                best_count = 0
+                for row in rows:
+                    try:
+                        count = int(row[0])
+                    except Exception:
+                        count = 0
+                    if count >= best_count:
+                        best_count = count
+                return [True, best_count, None]
+
+        # Broad fallback when where-clause columns differ across deployments.
+        phone_scan_payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": ["phone", "used_count"],
+            "ops": "SELECT",
+            "where": None,
+            "value": None
+        }
+        phone_scan_resp = db_execute(phone_scan_payload)
+        if phone_scan_resp.get("status"):
+            best_count = None
+            for row in phone_scan_resp.get("data", []):
+                if len(row) < 2:
+                    continue
+                if str(row[0]).strip() != str(phone).strip():
+                    continue
+                try:
+                    count = int(row[1])
+                except Exception:
+                    count = 0
+                if best_count is None or count > best_count:
+                    best_count = count
+            if best_count is not None:
+                return [True, best_count, None]
+
+        # If table is missing, allow feature and start from zero.
+        message = str(monthly_resp.get("message", ""))
+        if "Table Not found" in message and "ai_summary_usage_table" in message:
+            return [True, 0, None]
+
+        # If monthly query failed due schema mismatch, try to continue with zero instead of hard-failing.
+        message_2 = str(monthly_resp.get("message", ""))
+        if "does not exist" in message_2 or "Unknown column" in message_2:
+            return [True, 0, None]
+
+        return [False, str(monthly_resp)]
+
+    def _try_usage_write(self, cols, where, values):
+        payload = {
+            "db": "tenderwala",
+            "table": "ai_summary_usage_table",
+            "cols": cols,
+            "ops": "UPDATE" if where is not None else "INSERT",
+            "where": where,
+            "value": values
+        }
+        resp = db_execute(payload)
+        return bool(resp.get("status"))
+
+    def _set_ai_summary_usage(self, phone, next_count, row_id=None):
+        now_text = str(self.security_utils.get_datetime())
+        month_key = self._summary_month_key()
+        next_count_text = str(next_count)
+        generated_id = f"{month_key}:{str(phone).strip()}:{uuid4().hex}"
+
+        # Insert first when there is no known row id.
+        # UPDATE in current DB helper can return success even when 0 rows are affected.
+        if row_id is None:
+            # Explicit schema insert for the known table definition.
+            if self._try_usage_write(
+                ["id", "phone", "month_key", "used_count", "updated_on"],
+                None,
+                [generated_id, phone, month_key, next_count_text, now_text]
+            ):
+                return True
+            insert_attempts = [
+                (["id", "phone", "month_key", "used_count", "updated_on"], [generated_id, phone, month_key, next_count_text, now_text]),
+                (["id", "phone", "month_key", "used_count"], [generated_id, phone, month_key, next_count_text]),
+                (["id", "phone", "used_count", "updated_on"], [generated_id, phone, next_count_text, now_text]),
+                (["id", "phone", "used_count"], [generated_id, phone, next_count_text]),
+            ]
+            for cols, values in insert_attempts:
+                if self._try_usage_write(cols, None, values):
+                    return True
+
+        # 1) Try updates first (monthly + legacy variants).
+        update_attempts = []
+        if row_id is not None:
+            update_attempts.extend([
+                (["used_count", "updated_on"], ["id"], [next_count_text, now_text, row_id]),
+                (["used_count"], ["id"], [next_count_text, row_id]),
+            ])
+
+        update_attempts.extend([
+            (["used_count", "updated_on"], ["phone", "month_key"], [next_count_text, now_text, phone, month_key]),
+            (["used_count"], ["phone", "month_key"], [next_count_text, phone, month_key]),
+            (["used_count", "updated_on"], ["phone"], [next_count_text, now_text, phone]),
+            (["used_count"], ["phone"], [next_count_text, phone]),
+        ])
+
+        for cols, where, values in update_attempts:
+            if self._try_usage_write(cols, where, values):
+                return True
+
+        # 2) Retry inserts for monthly/legacy schemas.
+        fallback_inserts = [
+            (["id", "phone", "month_key", "used_count", "updated_on"], [generated_id, phone, month_key, next_count_text, now_text]),
+            (["id", "phone", "month_key", "used_count"], [generated_id, phone, month_key, next_count_text]),
+            (["id", "phone", "used_count", "updated_on"], [generated_id, phone, next_count_text, now_text]),
+            (["id", "phone", "used_count"], [generated_id, phone, next_count_text]),
+        ]
+        for cols, values in fallback_inserts:
+            if self._try_usage_write(cols, None, values):
+                return True
+
+        # 3) Final retry update by phone in case insert failed due duplicate/constraint race.
+        if self._try_usage_write(["used_count"], ["phone"], [next_count_text, phone]):
+            return True
+        if self._try_usage_write(["used_count", "updated_on"], ["phone"], [next_count_text, now_text, phone]):
+            return True
+
+        return False
+
+    def _is_blankish(self, value):
+        if value is None:
+            return True
+        text = str(value).strip().lower()
+        return text in ["", "none", "null", "nan", "n/a"]
+
+    def _extract_download_link_from_html(self, base_url, html_text):
+        raw = str(html_text or "")
+        if raw.strip() == "":
+            return None
+
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(raw, "html.parser")
+            best = None
+            for anchor in soup.find_all("a"):
+                href = str(anchor.get("href") or "").strip()
+                if href == "":
+                    continue
+                full = urljoin(base_url, href)
+                label = anchor.get_text(" ", strip=True).lower()
+                href_low = full.lower()
+
+                if any(x in label for x in ["download tender document", "download bidding document", "download document"]):
+                    return full
+
+                if best is None and (
+                    href_low.endswith(".pdf")
+                    or href_low.endswith(".doc")
+                    or href_low.endswith(".docx")
+                    or "download" in label
+                    or "download" in href_low
+                ):
+                    best = full
+
+            if best is None:
+                for node in soup.find_all(attrs={"onclick": True}):
+                    onclick = str(node.get("onclick") or "")
+                    m = re.search(r"(?:window\.open|location\.href)\(['\"]([^'\"]+)['\"]\)", onclick, flags=re.IGNORECASE)
+                    if m:
+                        candidate = urljoin(base_url, m.group(1))
+                        cand_low = candidate.lower()
+                        if any(x in cand_low for x in [".pdf", ".doc", ".docx", "download", "tenderdoc", "bidding"]):
+                            return candidate
+
+            if best is None:
+                for attr_name in ["data-url", "data-href", "data-download"]:
+                    for node in soup.find_all(attrs={attr_name: True}):
+                        candidate = urljoin(base_url, str(node.get(attr_name) or "").strip())
+                        if candidate.strip() != "":
+                            cand_low = candidate.lower()
+                            if any(x in cand_low for x in [".pdf", ".doc", ".docx", "download", "tenderdoc", "bidding"]):
+                                return candidate
+            return best
+        except Exception:
+            m2 = re.search(r"(?:window\.open|location\.href)\(['\"]([^'\"]+)['\"]\)", raw, flags=re.IGNORECASE)
+            if m2:
+                return urljoin(base_url, m2.group(1))
+
+            m3 = re.search(r"https?://[^\s\"']+\.(?:pdf|docx?|rtf)(?:\?[^\s\"']*)?", raw, flags=re.IGNORECASE)
+            if m3:
+                return m3.group(0)
+
+            m = re.search(r"href\s*=\s*[\"']([^\"']+)[\"']", raw, flags=re.IGNORECASE)
+            if m:
+                return urljoin(base_url, m.group(1))
+            return None
+
+    def _http_get_for_docs(self, url, timeout=60):
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        return requests.get(url, timeout=timeout, headers=headers)
+
+    def _is_noise_sentence(self, sentence):
+        txt = str(sentence).strip()
+        if txt == "":
+            return True
+
+        low = txt.lower()
+        if "<" in txt or "{" in txt or "}" in txt:
+            return True
+
+        noise_markers = [
+            "home tenders",
+            "active tenders",
+            "tenders history",
+            "evaluation results",
+            "contracts grievances",
+            "blacklisted firms",
+            "copyright",
+            "no-js",
+            "navbar",
+            "position-sticky",
+            "viewport",
+            "public procurement regulatory authority",
+        ]
+        procurement_markers = [
+            "tender",
+            "bid",
+            "security",
+            "estimate",
+            "submission",
+            "technical",
+            "financial",
+            "qualification",
+            "document",
+            "emd",
+            "cdr",
+        ]
+
+        if any(marker in low for marker in noise_markers) and (not any(marker in low for marker in procurement_markers)):
+            return True
+
+        if len(re.findall(r"[a-zA-Z]", txt)) < 8:
+            return True
+        return False
+
+    def _response_suffix_hint(self, url, resp):
+        known_exts = [".pdf", ".doc", ".docx", ".docm", ".rtf", ".txt", ".html", ".htm", ".xml"]
+
+        url_ext = os.path.splitext(str(url).split("?")[0])[1].lower()
+        if url_ext in known_exts:
+            return url_ext
+
+        disp = str(resp.headers.get("Content-Disposition", ""))
+        if disp.strip() != "":
+            filename_match = re.search(r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disp, flags=re.IGNORECASE)
+            if filename_match:
+                file_name = unquote(filename_match.group(1)).strip().strip('"')
+                file_ext = os.path.splitext(file_name)[1].lower()
+                if file_ext in known_exts:
+                    return file_ext
+
+        content_type = str(resp.headers.get("Content-Type", "")).lower()
+        if "application/pdf" in content_type:
+            return ".pdf"
+        if "officedocument.wordprocessingml.document" in content_type:
+            return ".docx"
+        if "msword" in content_type:
+            return ".doc"
+        if "text/html" in content_type:
+            return ".html"
+        if "application/rtf" in content_type or "text/rtf" in content_type:
+            return ".rtf"
+        if "text/plain" in content_type:
+            return ".txt"
+
+        magic = resp.content[:32]
+        lower_magic = magic.lower()
+        if magic.startswith(b"%PDF"):
+            return ".pdf"
+        if magic.startswith(b"PK\x03\x04"):
+            return ".docx"
+        if lower_magic.startswith(b"<!doctype html") or lower_magic.startswith(b"<html"):
+            return ".html"
+        return ".bin"
+
+    def _extract_docx_text(self, file_path):
+        chunks = []
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                xml_parts = [
+                    name
+                    for name in zf.namelist()
+                    if name.startswith("word/") and name.endswith(".xml")
+                ]
+
+                preferred = [
+                    "word/document.xml",
+                    "word/header1.xml",
+                    "word/header2.xml",
+                    "word/header3.xml",
+                    "word/footer1.xml",
+                ]
+
+                ordered = []
+                for name in preferred:
+                    if name in xml_parts:
+                        ordered.append(name)
+                for name in xml_parts:
+                    if name not in ordered:
+                        ordered.append(name)
+
+                for name in ordered[:8]:
+                    try:
+                        xml_text = zf.read(name).decode("utf-8", errors="ignore")
+                    except Exception:
+                        continue
+                    xml_text = xml_text.replace("</w:p>", "\n")
+                    plain = re.sub(r"<[^>]+>", " ", xml_text)
+                    plain = re.sub(r"\s+", " ", plain).strip()
+                    if plain != "":
+                        chunks.append(plain)
+        except Exception:
+            return ""
+
+        return "\n".join(chunks)
+
+    def _extract_html_text(self, file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                html_text = f.read(800000)
+        except Exception:
+            return ""
+
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html_text, "html.parser")
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            for tag_name in ["nav", "header", "footer", "aside"]:
+                for node in soup.find_all(tag_name):
+                    node.decompose()
+
+            text = soup.get_text(separator=" ", strip=True)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+        except Exception:
+            html_text = re.sub(r"<script[\s\S]*?</script>", " ", html_text, flags=re.IGNORECASE)
+            html_text = re.sub(r"<style[\s\S]*?</style>", " ", html_text, flags=re.IGNORECASE)
+            html_text = re.sub(r"<[^>]+>", " ", html_text)
+            html_text = re.sub(r"\s+", " ", html_text).strip()
+            return html_text
+
+    def _sanitize_doc_text_for_summary(self, doc_text):
+        text = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if text == "":
+            return ""
+
+        junk_phrases = [
+            "home tenders active tenders",
+            "tenders history",
+            "evaluation results",
+            "contracts grievances",
+            "job advertisements",
+            "blacklisted firms",
+            "public procurement regulatory authority",
+        ]
+        for phrase in junk_phrases:
+            text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
+
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?;])\s+", text) if s.strip() != ""]
+        kept = []
+        for sentence in sentences:
+            if len(sentence) < 20:
+                continue
+            if self._is_noise_sentence(sentence):
+                continue
+            kept.append(sentence)
+
+        if len(kept) == 0:
+            return text[:7000]
+        return " ".join(kept[:90])[:12000]
+
+    def _enrich_insights_with_tender_meta(self, insights, tender_meta):
+        merged = {
+            "cdr_amount": insights.get("cdr_amount", "N/A"),
+            "estimate_amount": insights.get("estimate_amount", "N/A"),
+            "documents_required": list(insights.get("documents_required", [])),
+            "evaluation_criteria": list(insights.get("evaluation_criteria", [])),
+            "overall_points": list(insights.get("overall_points", [])),
+            "text_length": insights.get("text_length", 0),
+        }
+
+        est_cost = tender_meta.get("estimated_cost")
+        if str(merged.get("estimate_amount", "N/A")).strip().lower() == "n/a" and (not self._is_blankish(est_cost)):
+            merged["estimate_amount"] = str(est_cost).strip()
+
+        meta_points = []
+        if not self._is_blankish(tender_meta.get("title")):
+            meta_points.append(f"Tender: {str(tender_meta.get('title')).strip()}")
+        if not self._is_blankish(tender_meta.get("department")):
+            meta_points.append(f"Department: {str(tender_meta.get('department')).strip()}")
+        if not self._is_blankish(tender_meta.get("city")):
+            meta_points.append(f"Location: {str(tender_meta.get('city')).strip()}")
+        if not self._is_blankish(tender_meta.get("category")) and str(tender_meta.get("category")).strip().lower() != "none":
+            meta_points.append(f"Category: {str(tender_meta.get('category')).strip()}")
+        if not self._is_blankish(tender_meta.get("date_opening")):
+            meta_points.append(f"Bid Opening: {str(tender_meta.get('date_opening')).strip()}")
+        if not self._is_blankish(tender_meta.get("date_published")):
+            meta_points.append(f"Published: {str(tender_meta.get('date_published')).strip()}")
+
+        seen = set([str(item).strip().lower() for item in merged["overall_points"]])
+        for point in meta_points:
+            key = point.lower()
+            if key not in seen:
+                merged["overall_points"].append(point)
+                seen.add(key)
+
+        merged["overall_points"] = merged["overall_points"][:6]
+        return merged
+
+    def _download_doc_for_summary(self, doc_ref, table):
+        if table in ["sindh_table", "kpk_table"]:
+            portal_scraper = Sindh_Scrapper(self.security_utils) if table == "sindh_table" else KPK_Scrapper(self.security_utils)
+            doc_resp = portal_scraper.get_doc(doc_ref)
+            if not doc_resp[0]:
+                label = "Sindh" if table == "sindh_table" else "KPK"
+                return [False, f"{label} document fetch failed: {str(doc_resp[1])}", None, False]
+            file_name = doc_resp[1]
+            local_path = os.path.join("static", "documents", str(file_name))
+            if not os.path.exists(local_path):
+                return [False, "Portal document downloaded but file not found locally", None, False]
+            return [True, "", local_path, True]
+
+        url = str(doc_ref).strip()
+        if url == "" or (not url.lower().startswith("http")):
+            return [False, "Invalid document URL", None, False]
+
+        try:
+            resp = self._http_get_for_docs(url, timeout=60)
+        except Exception as e:
+            return [False, f"Document download failed: {str(e)}", None, False]
+
+        if resp.status_code != 200:
+            return [False, f"Document URL returned status {resp.status_code}", None, False]
+
+        final_url = url
+        final_resp = resp
+        for _ in range(2):
+            suffix_guess = self._response_suffix_hint(final_url, final_resp)
+            content_type = str(final_resp.headers.get("Content-Type", "")).lower()
+            is_html = (suffix_guess in [".html", ".htm", ".xml"]) or ("text/html" in content_type)
+            if not is_html:
+                break
+
+            try:
+                html_text = final_resp.content.decode("utf-8", errors="ignore")
+            except Exception:
+                html_text = ""
+
+            next_url = self._extract_download_link_from_html(final_url, html_text)
+            if next_url is None or str(next_url).strip() == "" or str(next_url).strip() == str(final_url).strip():
+                break
+
+            try:
+                next_resp = self._http_get_for_docs(next_url, timeout=60)
+            except Exception:
+                break
+
+            if next_resp.status_code != 200:
+                break
+
+            final_url = next_url
+            final_resp = next_resp
+
+        suffix = self._response_suffix_hint(final_url, final_resp)
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp_file.write(final_resp.content)
+        tmp_file.close()
+        return [True, "", tmp_file.name, True]
+
+    def _extract_doc_text(self, file_path):
+        if not file_path or (not os.path.exists(file_path)):
+            return ""
+
+        ext = os.path.splitext(str(file_path))[1].lower()
+        magic = b""
+        try:
+            with open(file_path, "rb") as sig_fp:
+                magic = sig_fp.read(64)
+        except Exception:
+            magic = b""
+
+        if ext in ["", ".bin", ".tmp"]:
+            if magic.startswith(b"%PDF"):
+                ext = ".pdf"
+            elif magic.startswith(b"PK\x03\x04"):
+                ext = ".docx"
+            else:
+                low = magic.lower()
+                if low.startswith(b"<!doctype html") or low.startswith(b"<html"):
+                    ext = ".html"
+
+        text = ""
+        if ext == ".pdf":
+            reader_cls = None
+            try:
+                from pypdf import PdfReader as _PdfReader
+                reader_cls = _PdfReader
+            except Exception:
+                try:
+                    from PyPDF2 import PdfReader as _PdfReader
+                    reader_cls = _PdfReader
+                except Exception:
+                    reader_cls = None
+
+            if reader_cls is not None:
+                try:
+                    reader = reader_cls(file_path)
+                    chunks = []
+                    page_count = len(reader.pages)
+                    max_pages = page_count
+                    for i in range(max_pages):
+                        page_text = reader.pages[i].extract_text() or ""
+                        if page_text.strip() != "":
+                            chunks.append(page_text.strip())
+                    text = "\n".join(chunks)
+                except Exception:
+                    text = ""
+        elif ext in [".docx", ".docm"]:
+            text = self._extract_docx_text(file_path)
+        elif ext in [".html", ".htm", ".xml"]:
+            text = self._extract_html_text(file_path)
+        else:
+            try:
+                with open(file_path, "rb") as f:
+                    raw = f.read(450000)
+                text = raw.decode("utf-8", errors="ignore")
+            except Exception:
+                text = ""
+
+        clean = re.sub(r"\s+", " ", str(text)).strip()
+        return clean[:120000]
+
+    def _extract_pdf_page_texts(self, file_path, max_pages=400, max_chars_per_page=3500):
+        pages = []
+        if not file_path or (not os.path.exists(file_path)):
+            return pages
+
+        reader_cls = None
+        try:
+            from pypdf import PdfReader as _PdfReader
+            reader_cls = _PdfReader
+        except Exception:
+            try:
+                from PyPDF2 import PdfReader as _PdfReader
+                reader_cls = _PdfReader
+            except Exception:
+                reader_cls = None
+
+        if reader_cls is None:
+            return pages
+
+        try:
+            reader = reader_cls(file_path)
+            page_count = min(len(reader.pages), max_pages)
+            for i in range(page_count):
+                try:
+                    page_text = reader.pages[i].extract_text() or ""
+                except Exception:
+                    page_text = ""
+                cleaned = re.sub(r"\s+", " ", str(page_text)).strip()
+                pages.append(cleaned[:max_chars_per_page])
+            return pages
+        except Exception:
+            return []
+
+    def _first_last_pages_context(self, file_path, doc_text="", first_n=10, last_n=10):
+        ext = os.path.splitext(str(file_path))[1].lower()
+        page_texts = []
+        if ext == ".pdf":
+            page_texts = self._extract_pdf_page_texts(file_path)
+
+        if len(page_texts) > 0:
+            page_count = len(page_texts)
+            selected_indexes = []
+            selected_seen = set()
+
+            for i in range(min(first_n, page_count)):
+                selected_indexes.append(i)
+                selected_seen.add(i)
+
+            start_last = max(0, page_count - last_n)
+            for i in range(start_last, page_count):
+                if i not in selected_seen:
+                    selected_indexes.append(i)
+                    selected_seen.add(i)
+
+            selected_indexes.sort()
+            chunks = []
+            for i in selected_indexes:
+                content = page_texts[i]
+                if content.strip() == "":
+                    continue
+                chunks.append(f"[PAGE {i + 1}] {content}")
+
+            context_text = "\n\n".join(chunks)
+            context_text = context_text[:90000]
+            return {
+                "page_count": page_count,
+                "selected_count": len(selected_indexes),
+                "context_text": context_text,
+                "selection_note": f"first_{first_n}_and_last_{last_n}_pages"
+            }
+
+        compact = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if compact == "":
+            return {
+                "page_count": 0,
+                "selected_count": 0,
+                "context_text": "",
+                "selection_note": "no_pdf_pages_no_text"
+            }
+
+        head = compact[:45000]
+        tail = compact[-45000:] if len(compact) > 45000 else ""
+        fallback_context = "[HEAD]\n" + head
+        if tail != "":
+            fallback_context += "\n\n[TAIL]\n" + tail
+
+        return {
+            "page_count": 0,
+            "selected_count": 0,
+            "context_text": fallback_context[:90000],
+            "selection_note": "text_head_tail_fallback"
+        }
+
+    def _split_doc_sentences(self, doc_text):
+        compact = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if compact == "":
+            return []
+        return [s.strip() for s in re.split(r"(?<=[.!?;])\s+", compact) if s.strip() != ""]
+
+    def _pick_keyword_sentences(self, sentences, keywords, limit=4, min_len=25, max_len=220):
+        results = []
+        seen = set()
+        for sentence in sentences:
+            if self._is_noise_sentence(sentence):
+                continue
+            if len(sentence) < min_len:
+                continue
+            low = sentence.lower()
+            if any(k in low for k in keywords):
+                item = sentence[:max_len].strip()
+                key = item.lower()
+                if key not in seen:
+                    seen.add(key)
+                    results.append(item)
+            if len(results) >= limit:
+                break
+        return results
+
+    def _extract_amount_by_keywords(self, doc_text, keywords, fallback_label):
+        text = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if text == "":
+            return "N/A"
+
+        amount_pattern = (
+            r"(?:"
+            r"(?:rs\.?|pkr|pak\s*rupees?|rupees?)\s*[:\-]?\s*[0-9][0-9,]{0,15}(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?\s*(?:/\-)?"
+            r"|"
+            r"[0-9]{1,2}(?:\.[0-9]{1,2})?\s*(?:%|percent)"
+            r"|"
+            r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k|rs\.?|pkr|rupees?))?\s*(?:/\-)?"
+            r"|"
+            r"[0-9]{4,}(?:\.[0-9]{1,2})?\s*(?:million|billion|crore|lakh|thousand|k|rs\.?|pkr|rupees?)\s*(?:/\-)?"
+            r")"
+        )
+        joined_kw = "|".join([re.escape(k) for k in keywords])
+        if joined_kw == "":
+            return "N/A"
+
+        def _clean_amount(value):
+            out = str(value).strip()
+            out = re.sub(r"\s+", " ", out)
+            return out.strip(" :;,.\t")
+
+        near_pattern = rf"(?:{joined_kw}).{{0,220}}?({amount_pattern})"
+        m = re.search(near_pattern, text, flags=re.IGNORECASE)
+        if m:
+            return _clean_amount(m.group(1))
+
+        reverse_pattern = rf"({amount_pattern}).{{0,140}}?(?:{joined_kw})"
+        m2 = re.search(reverse_pattern, text, flags=re.IGNORECASE)
+        if m2:
+            return _clean_amount(m2.group(1))
+
+        # Structured label form fallback for lines like "Bid Security: 2%" or "Estimated Cost = PKR 5,000,000".
+        label_pattern = rf"(?:{joined_kw})\s*(?::|=|is|shall be|shall not be less than|not less than|at least)?\s*({amount_pattern})"
+        m_label = re.search(label_pattern, text, flags=re.IGNORECASE)
+        if m_label:
+            return _clean_amount(m_label.group(1))
+
+        # Sentence-level fallback for cases like "Bid Security shall be 2%".
+        sentences = self._split_doc_sentences(text)
+        for sentence in sentences[:220]:
+            if self._is_noise_sentence(sentence):
+                continue
+            low = sentence.lower()
+            if not any(k in low for k in keywords):
+                continue
+            m3 = re.search(amount_pattern, sentence, flags=re.IGNORECASE)
+            if m3:
+                val = m3.group(1).strip() if m3.lastindex else m3.group(0).strip()
+                return _clean_amount(val)
+
+        # Last relaxed fallback: keyword exists but amount is not in a standard format.
+        if fallback_label is not None and str(fallback_label).strip() != "":
+            if any(k in text.lower() for k in [str(x).lower() for x in keywords]):
+                return str(fallback_label).strip()
+        return "N/A"
+
+    def _extract_bid_structure(self, doc_text):
+        text = re.sub(r"\s+", " ", str(doc_text)).strip().lower()
+        if text == "":
+            return "N/A"
+
+        lot_patterns = [
+            r"\blot[\s\-]*wise\b",
+            r"\blots[\s\-]*wise\b",
+            r"\bon\s+lot\s+basis\b",
+            r"\bas\s+a\s+single\s+lot\b",
+            r"\blot\s+no\.?\b",
+            r"\bpackage[\s\-]*wise\b",
+        ]
+        item_patterns = [
+            r"\bitem[\s\-]*wise\b",
+            r"\bitems[\s\-]*wise\b",
+            r"\bon\s+item\s+basis\b",
+            r"\beach\s+item\b",
+        ]
+
+        lot_found = any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in lot_patterns)
+        item_found = any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in item_patterns)
+
+        if lot_found and item_found:
+            return "Lot Wise / Item Wise mentioned"
+        if lot_found:
+            return "Lot Wise"
+        if item_found:
+            return "Item Wise"
+        return "N/A"
+
+    def _extract_important_notes(self, doc_text, tender_meta=None, limit=4):
+        sentences = self._split_doc_sentences(doc_text)
+        keywords = [
+            "important",
+            "note",
+            "mandatory",
+            "must",
+            "shall",
+            "submission",
+            "opening",
+            "validity",
+            "eligible",
+            "eligibility",
+            "late bid",
+            "late bids",
+            "incomplete",
+            "single stage",
+            "single-stage",
+            "two stage",
+            "two-stage",
+            "technical proposal",
+            "financial proposal",
+            "sealed",
+            "separate envelope",
+            "separate bid",
+            "lot wise",
+            "item wise",
+            "package wise",
+        ]
+
+        notes = []
+        seen = set()
+        for sentence in sentences[:260]:
+            if self._is_noise_sentence(sentence):
+                continue
+            item = re.sub(r"\s+", " ", str(sentence)).strip()
+            if len(item) < 18:
+                continue
+            low = item.lower()
+            if not any(keyword in low for keyword in keywords):
+                continue
+            item = item[:220]
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            notes.append(item)
+            if len(notes) >= limit:
+                break
+
+        if len(notes) == 0 and isinstance(tender_meta, dict):
+            fallback_notes = []
+            if not self._is_blankish(tender_meta.get("date_opening")):
+                fallback_notes.append(f"Bid Opening: {str(tender_meta.get('date_opening')).strip()}")
+            if not self._is_blankish(tender_meta.get("department")):
+                fallback_notes.append(f"Department: {str(tender_meta.get('department')).strip()}")
+            if not self._is_blankish(tender_meta.get("city")):
+                fallback_notes.append(f"Location: {str(tender_meta.get('city')).strip()}")
+            if not self._is_blankish(tender_meta.get("category")) and str(tender_meta.get("category")).strip().lower() != "none":
+                fallback_notes.append(f"Category: {str(tender_meta.get('category')).strip()}")
+            notes = fallback_notes[:limit]
+
+        return notes[:limit]
+
+    def _extract_rule_based_doc_insights(self, doc_text):
+        import re
+        sentences = self._split_doc_sentences(doc_text)
+        text = str(doc_text)
+        lines = text.splitlines()
+
+        # --- Estimated Cost ---
+        est_cost = "N/A"
+        est_cost_pattern = re.compile(r"Estimated Cost\s*:?\s*([\d,]+\s*/-)", re.IGNORECASE)
+        est_cost_match = est_cost_pattern.search(text)
+        if est_cost_match:
+            est_cost = est_cost_match.group(1).strip()
+        else:
+            for i, line in enumerate(lines):
+                if re.search(r"Estimated Cost", line, re.IGNORECASE):
+                    for j in range(1, 3):
+                        if i + j < len(lines):
+                            m = re.search(r"([\d,]+\s*/-)" , lines[i + j])
+                            if m:
+                                est_cost = m.group(1).strip()
+                                break
+                    if est_cost != "N/A":
+                        break
+
+        # --- CDR/Bidding Fee ---
+        cdr = "N/A"
+        cdr_pattern = re.compile(r"bidding fee[\w\s\(\)%:]*?([\d,]+\s*/-)", re.IGNORECASE)
+        cdr_match = cdr_pattern.search(text)
+        if cdr_match:
+            cdr = cdr_match.group(1).strip()
+        else:
+            for i, line in enumerate(lines):
+                if re.search(r"bidding fee", line, re.IGNORECASE):
+                    for j in range(1, 3):
+                        if i + j < len(lines):
+                            m = re.search(r"([\d,]+\s*/-)" , lines[i + j])
+                            if m:
+                                cdr = m.group(1).strip()
+                                break
+                    if cdr != "N/A":
+                        break
+
+        # --- Required Documents ---
+        docs_required = []
+        docs_pattern = re.compile(r"(required documents|bidding documents)\s*:?\s*(.*)", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            m = docs_pattern.search(line)
+            if m:
+                for j in range(1, 6):
+                    if i + j < len(lines):
+                        doc_line = lines[i + j].strip()
+                        if doc_line == '' or len(doc_line) < 3:
+                            continue
+                        if re.search(r"criteria|amount|cost|fee|summary", doc_line, re.IGNORECASE):
+                            break
+                        docs_required.append(doc_line)
+                break
+        if not docs_required:
+            docs_required = self._pick_keyword_sentences(
+                sentences,
+                ["documents required", "mandatory documents", "required documents", "bidding documents"],
+                limit=5,
+                min_len=10,
+                max_len=200
+            )
+
+        # --- Evaluation Criteria ---
+        eval_criteria = []
+        crit_pattern = re.compile(r"criteria\s*:?\s*(.*)", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            m = crit_pattern.search(line)
+            if m:
+                for j in range(1, 6):
+                    if i + j < len(lines):
+                        crit_line = lines[i + j].strip()
+                        if crit_line == '' or len(crit_line) < 3:
+                            continue
+                        if re.search(r"documents|amount|cost|fee|summary", crit_line, re.IGNORECASE):
+                            break
+                        eval_criteria.append(crit_line)
+                break
+        if not eval_criteria:
+            eval_criteria = self._pick_keyword_sentences(
+                sentences,
+                ["criteria", "evaluation criteria", "technical evaluation", "financial evaluation"],
+                limit=5,
+                min_len=10,
+                max_len=200
+            )
+
+        # --- Overall Points (unchanged) ---
+        overall_points = self._pick_keyword_sentences(
+            sentences,
+            [
+                "scope", "work", "service", "supply", "project", "contract",
+                "timeline", "delivery", "completion", "objective", "procurement"
+            ],
+            limit=6,
+            min_len=30,
+            max_len=210
+        )
+
+        if len(overall_points) == 0 and len(sentences) > 0:
+            overall_points = [
+                s[:210]
+                for s in sentences[:25]
+                if len(s.strip()) > 20 and (not self._is_noise_sentence(s))
+            ][:4]
+
+        return {
+            "cdr_amount": cdr,
+            "estimate_amount": est_cost,
+            "documents_required": docs_required,
+            "evaluation_criteria": eval_criteria,
+            "overall_points": overall_points,
+            "text_length": len(str(doc_text)),
+        }
+
+    def _extract_regex_doc_insights(self, doc_text):
+        text = re.sub(r"\s+", " ", str(doc_text)).strip()
+        if text == "":
+            return {
+                "cdr_amount": "N/A",
+                "estimate_amount": "N/A",
+                "documents_required": [],
+                "evaluation_criteria": [],
+            }
+
+        amount_pat = r"(?:rs\.?|pkr)?\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?(?:\s*(?:million|billion|crore|lakh|thousand|k))?|[0-9]{1,2}(?:\.[0-9]{1,2})?\s*%"
+
+        def _find_near_amount(keywords, window=140):
+            keys = "|".join([re.escape(k) for k in keywords])
+            if keys == "":
+                return "N/A"
+            m = re.search(rf"(?:{keys}).{{0,{window}}}?({amount_pat})", text, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+            m = re.search(rf"({amount_pat}).{{0,90}}?(?:{keys})", text, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+            return "N/A"
+
+        cdr_amount = _find_near_amount([
+            "cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"
+        ])
+        estimate_amount = _find_near_amount([
+            "estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value"
+        ])
+
+        doc_patterns = [
+            r"documents? required[:\-]?\s*([^\.\n]{20,260})",
+            r"mandatory documents?[:\-]?\s*([^\.\n]{20,260})",
+            r"submit(?:ted|ting)?[:\-]?\s*([^\.\n]{20,260})",
+        ]
+        eval_patterns = [
+            r"evaluation criteria[:\-]?\s*([^\.\n]{20,260})",
+            r"technical evaluation[:\-]?\s*([^\.\n]{20,260})",
+            r"financial evaluation[:\-]?\s*([^\.\n]{20,260})",
+            r"qualification criteria[:\-]?\s*([^\.\n]{20,260})",
+        ]
+
+        def _collect(patterns, limit=4):
+            out = []
+            seen = set()
+            for pat in patterns:
+                for m in re.finditer(pat, text, flags=re.IGNORECASE):
+                    val = re.sub(r"\s+", " ", str(m.group(1))).strip(" -:;,.\t")
+                    if len(val) < 12:
+                        continue
+                    key = val.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(val)
+                    if len(out) >= limit:
+                        return out
+            return out
+
+        return {
+            "cdr_amount": cdr_amount,
+            "estimate_amount": estimate_amount,
+            "documents_required": _collect(doc_patterns, 4),
+            "evaluation_criteria": _collect(eval_patterns, 4),
+        }
+
+    def _merge_missing_with_regex(self, insights, doc_text):
+        regex_insights = self._extract_regex_doc_insights(doc_text)
+        merged = dict(insights)
+
+        if self._na_or_empty(merged.get("cdr_amount")) and (not self._na_or_empty(regex_insights.get("cdr_amount"))):
+            merged["cdr_amount"] = regex_insights.get("cdr_amount")
+        if self._na_or_empty(merged.get("estimate_amount")) and (not self._na_or_empty(regex_insights.get("estimate_amount"))):
+            merged["estimate_amount"] = regex_insights.get("estimate_amount")
+
+        for key in ["documents_required", "evaluation_criteria"]:
+            current = merged.get(key, [])
+            if self._list_na_or_empty(current):
+                candidate = regex_insights.get(key, [])
+                if isinstance(candidate, list) and len(candidate) > 0:
+                    merged[key] = candidate[:4]
+
+        return merged
+
+    def _na_or_empty(self, value):
+        if value is None:
+            return True
+        text = str(value).strip().lower()
+        return text in ["", "n/a", "none", "null"]
+
+    def _list_na_or_empty(self, items):
+        if not isinstance(items, list) or len(items) == 0:
+            return True
+        valid = [x for x in items if not self._na_or_empty(x)]
+        return len(valid) == 0
+
+    def _fill_na_insights_with_ai(self, insights, doc_text, tender_meta):
+        openai_key, model = self._openai_config()
+        if openai_key == "":
+            return insights
+
+        needs_fill = (
+            self._na_or_empty(insights.get("cdr_amount"))
+            or self._na_or_empty(insights.get("estimate_amount"))
+            or self._list_na_or_empty(insights.get("documents_required", []))
+            or self._list_na_or_empty(insights.get("evaluation_criteria", []))
+        )
+        if not needs_fill:
+            return insights
+
+        compact_doc = self._sanitize_doc_text_for_summary(doc_text)
+        if len(compact_doc) < 600:
+            compact_doc = re.sub(r"\s+", " ", str(doc_text)).strip()
+        compact_doc = compact_doc[:50000]
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract structured tender facts from procurement documents. "
+                        "Return strict JSON only. Prefer concrete values from document text and metadata. "
+                        "Use N/A only when a value is truly not present."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Return ONLY valid JSON with keys: "
+                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_points. "
+                        "documents_required/evaluation_criteria/overall_points must be arrays of short strings. "
+                        "If a field can be inferred from nearby wording, provide best value instead of N/A. "
+                        f"Tender metadata: {json.dumps(tender_meta, ensure_ascii=False)}\n"
+                        f"Current extracted hints: {json.dumps(insights, ensure_ascii=False)}\n"
+                        f"Document text: {compact_doc}"
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "max_tokens": 420,
+        }
+        headers = {
+            "Authorization": f"Bearer {openai_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                return insights
+
+            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if content == "":
+                return insights
+
+            start = content.find("{")
+            end = content.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return insights
+
+            parsed = json.loads(content[start:end + 1])
+            merged = dict(insights)
+
+            if self._na_or_empty(merged.get("cdr_amount")) and (not self._na_or_empty(parsed.get("cdr_amount"))):
+                merged["cdr_amount"] = str(parsed.get("cdr_amount")).strip()
+            if self._na_or_empty(merged.get("estimate_amount")) and (not self._na_or_empty(parsed.get("estimate_amount"))):
+                merged["estimate_amount"] = str(parsed.get("estimate_amount")).strip()
+
+            for key in ["documents_required", "evaluation_criteria", "overall_points"]:
+                current = merged.get(key, [])
+                if not isinstance(current, list):
+                    current = []
+                if self._list_na_or_empty(current):
+                    candidate = parsed.get(key, [])
+                    if isinstance(candidate, list):
+                        merged[key] = [str(x).strip() for x in candidate if str(x).strip() != ""][:5]
+
+            return merged
+        except Exception:
+            return insights
+
+    def _build_rule_based_summary(self, insights):
+        docs = insights.get("documents_required", [])
+        evals = insights.get("evaluation_criteria", [])
+        overall = insights.get("overall_points", [])
+
+        lines = [
+            "AI Quick Tender Summary",
+            f"1) CDR Amount: {insights.get('cdr_amount', 'N/A')}",
+            f"2) Estimate Amount: {insights.get('estimate_amount', 'N/A')}",
+            "3) Documents Required:",
+        ]
+
+        if len(docs) == 0:
+            lines.append("- N/A")
+        else:
+            for item in docs[:4]:
+                lines.append(f"- {item}")
+
+        lines.append("4) Evaluation Criteria:")
+        if len(evals) == 0:
+            lines.append("- N/A")
+        else:
+            for item in evals[:4]:
+                lines.append(f"- {item}")
+
+        lines.append("5) Overall Summary:")
+        if len(overall) == 0:
+            lines.append("- N/A")
+        else:
+            for item in overall[:3]:
+                lines.append(f"- {item}")
+
+        return "\n".join(lines)
+
+    def _build_ai_quick_summary(self, insights, doc_text="", tender_meta=None):
+        openai_key, model = self._openai_config()
+        if openai_key == "":
+            return [False, "missing_openai_key", ""]
+        if tender_meta is None:
+            tender_meta = {}
+
+        cleaned_doc_text = self._sanitize_doc_text_for_summary(doc_text)
+
+        cdr_hint = insights.get("cdr_amount", "N/A")
+        estimate_hint = insights.get("estimate_amount", "N/A")
+
+        if str(cdr_hint).strip().lower() == "n/a":
+            cdr_hint = self._extract_amount_by_keywords(
+                cleaned_doc_text,
+                ["cdr", "call deposit", "bid security", "earnest money", "emd", "security deposit"],
+                "Mentioned"
+            )
+
+        if str(estimate_hint).strip().lower() == "n/a":
+            estimate_hint = self._extract_amount_by_keywords(
+                cleaned_doc_text,
+                ["estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value", "estimated"],
+                "Mentioned"
+            )
+
+        meta_estimated_cost = tender_meta.get("estimated_cost")
+        if str(estimate_hint).strip().lower() == "n/a" and (not self._is_blankish(meta_estimated_cost)):
+            estimate_hint = str(meta_estimated_cost).strip()
+
+        compact_payload = {
+            "cdr_amount": cdr_hint,
+            "estimate_amount": estimate_hint,
+            "documents_required": insights.get("documents_required", [])[:4],
+            "evaluation_criteria": insights.get("evaluation_criteria", [])[:4],
+            "overall_points": insights.get("overall_points", [])[:5],
+        }
+        meta_payload = {
+            "title": tender_meta.get("title", "N/A"),
+            "department": tender_meta.get("department", "N/A"),
+            "city": tender_meta.get("city", "N/A"),
+            "category": tender_meta.get("category", "N/A"),
+            "date_opening": tender_meta.get("date_opening", "N/A"),
+            "date_published": tender_meta.get("date_published", "N/A"),
+            "estimated_cost": tender_meta.get("estimated_cost", "N/A"),
+        }
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert procurement assistant for WhatsApp users. "
+                        "Return strict JSON only with separated fields. "
+                        "Use N/A only when the value is truly unavailable in both metadata and text."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Return ONLY JSON object with these keys exactly:\n"
+                        "cdr_amount, estimate_amount, documents_required, evaluation_criteria, overall_summary\n"
+                        "Rules:\n"
+                        "- documents_required, evaluation_criteria, overall_summary must be arrays of short strings\n"
+                        "- max 4 items per array\n"
+                        "- derive cdr_amount and estimate_amount from document and metadata\n"
+                        "- prefer concrete values over N/A when reasonable from context\n"
+                        "- no markdown, no prose outside JSON\n"
+                        f"Tender metadata JSON: {json.dumps(meta_payload, ensure_ascii=False)}\n"
+                        f"Extracted hints JSON: {json.dumps(compact_payload, ensure_ascii=False)}\n"
+                        f"Document text (cleaned): {cleaned_doc_text[:50000]}"
+                    ),
+                },
+            ],
+            "temperature": 0.2,
+            "max_tokens": 700,
+        }
+        headers = {
+            "Authorization": f"Bearer {openai_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=75,
+            )
+            if resp.status_code != 200:
+                return [False, f"openai_status_{resp.status_code}", ""]
+
+            answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if answer == "":
+                return [False, "openai_empty_response", ""]
+
+            start = answer.find("{")
+            end = answer.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return [False, "openai_non_json_response", ""]
+
+            parsed = json.loads(answer[start:end + 1])
+
+            cdr_amount = str(parsed.get("cdr_amount", "N/A")).strip() or "N/A"
+            estimate_amount = str(parsed.get("estimate_amount", "N/A")).strip() or "N/A"
+
+            docs = parsed.get("documents_required", [])
+            if not isinstance(docs, list):
+                docs = []
+            docs = [str(x).strip() for x in docs if str(x).strip() != ""][:4]
+
+            evals = parsed.get("evaluation_criteria", [])
+            if not isinstance(evals, list):
+                evals = []
+            evals = [str(x).strip() for x in evals if str(x).strip() != ""][:4]
+
+            overall = parsed.get("overall_summary", [])
+            if not isinstance(overall, list):
+                overall = []
+            overall = [str(x).strip() for x in overall if str(x).strip() != ""][:4]
+
+            lines = [
+                "AI Quick Tender Summary",
+                f"1) CDR Amount: {cdr_amount if cdr_amount != '' else 'N/A'}",
+                f"2) Estimate Amount: {estimate_amount if estimate_amount != '' else 'N/A'}",
+                "3) Documents Required:",
+            ]
+            if len(docs) == 0:
+                lines.append("- N/A")
+            else:
+                for item in docs:
+                    lines.append(f"- {item}")
+
+            lines.append("4) Evaluation Criteria:")
+            if len(evals) == 0:
+                lines.append("- N/A")
+            else:
+                for item in evals:
+                    lines.append(f"- {item}")
+
+            lines.append("5) Overall Summary:")
+            if len(overall) == 0:
+                lines.append("- N/A")
+            else:
+                for item in overall:
+                    lines.append(f"- {item}")
+
+            return [True, "", "\n".join(lines)]
+        except Exception as e:
+            return [False, f"openai_error: {str(e)}", ""]
+
+    def _build_ai_quick_summary_from_pages(self, file_path, doc_text="", tender_meta=None):
+        openai_key, model = self._openai_config()
+        if openai_key == "":
+            return [False, "missing_openai_key", ""]
+        if tender_meta is None:
+            tender_meta = {}
+
+        ctx = self._first_last_pages_context(file_path, doc_text=doc_text, first_n=10, last_n=10)
+        selected_text = str(ctx.get("context_text", "")).strip()
+        if selected_text == "":
+            return [False, "empty_selected_pages", ""]
+
+        meta_payload = {
+            "title": tender_meta.get("title", "N/A"),
+            "department": tender_meta.get("department", "N/A"),
+            "city": tender_meta.get("city", "N/A"),
+            "category": tender_meta.get("category", "N/A"),
+            "date_opening": tender_meta.get("date_opening", "N/A"),
+            "date_published": tender_meta.get("date_published", "N/A"),
+            "estimated_cost": tender_meta.get("estimated_cost", "N/A"),
+            "page_count": ctx.get("page_count", 0),
+            "selection_note": ctx.get("selection_note", ""),
+        }
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert procurement assistant. "
+                        "Extract tender facts from provided page text. "
+                        "Return strict JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Read ONLY the provided pages and return ONLY valid JSON with keys exactly:\n"
+                        "estimated_cost, cdr_amount, required_documents, ai_summary\n"
+                        "Rules:\n"
+                        "- estimated_cost: string, exact value if found, else N/A\n"
+                        "- cdr_amount: string for bid security/CDR/bidding fee, else N/A\n"
+                        "- required_documents: array of short strings, max 8\n"
+                        "- ai_summary: array of 3-5 concise bullet-style strings\n"
+                        "- no markdown, no prose outside JSON\n"
+                        "- prefer exact values from page text; do not guess\n"
+                        "- use metadata only as weak hint; prioritize page text\n"
+                        f"Tender metadata: {json.dumps(meta_payload, ensure_ascii=False)}\n"
+                        f"Selected pages text: {selected_text[:90000]}"
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "max_tokens": 850,
+        }
+        headers = {
+            "Authorization": f"Bearer {openai_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=90,
+            )
+            if resp.status_code != 200:
+                return [False, f"openai_status_{resp.status_code}", ""]
+
+            answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if answer == "":
+                return [False, "openai_empty_response", ""]
+
+            start = answer.find("{")
+            end = answer.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return [False, "openai_non_json_response", ""]
+
+            parsed = json.loads(answer[start:end + 1])
+
+            cdr_amount = str(parsed.get("cdr_amount", "N/A")).strip() or "N/A"
+            estimate_amount = str(parsed.get("estimated_cost", "N/A")).strip() or "N/A"
+
+            docs = parsed.get("required_documents", [])
+            if not isinstance(docs, list):
+                docs = []
+            docs = [str(x).strip() for x in docs if str(x).strip() != ""][:8]
+
+            overall = parsed.get("ai_summary", [])
+            if not isinstance(overall, list):
+                overall = []
+            overall = [str(x).strip() for x in overall if str(x).strip() != ""][:5]
+
+            lines = [
+                "AI Quick Tender Summary",
+                f"1) CDR Amount: {cdr_amount if cdr_amount != '' else 'N/A'}",
+                f"2) Estimate Amount: {estimate_amount if estimate_amount != '' else 'N/A'}",
+                "3) Documents Required:",
+            ]
+
+            if len(docs) == 0:
+                lines.append("- N/A")
+            else:
+                for item in docs:
+                    lines.append(f"- {item}")
+
+            lines.append("4) Overall Summary:")
+            if len(overall) == 0:
+                lines.append("- N/A")
+            else:
+                for item in overall:
+                    lines.append(f"- {item}")
+
+            return [True, "", "\n".join(lines)]
+        except Exception as e:
+            return [False, f"openai_error: {str(e)}", ""]
+
+    def _build_programmatic_summary(self, doc_text, tender_meta=None):
+        if tender_meta is None:
+            tender_meta = {}
+
+        cleaned_text = self._sanitize_doc_text_for_summary(doc_text)
+        if cleaned_text.strip() == "":
+            cleaned_text = re.sub(r"\s+", " ", str(doc_text)).strip()
+
+        cdr_amount = self._extract_amount_by_keywords(
+            cleaned_text,
+            ["cdr", "call deposit", "bid security", "earnest money", "earnest money deposit", "emd", "security deposit"],
+            None
+        )
+        estimate_amount = self._extract_amount_by_keywords(
+            cleaned_text,
+            ["estimate", "estimated amount", "estimated cost", "engineer estimate", "estimated value", "total estimate", "total estimated cost"],
+            None
+        )
+        if self._na_or_empty(estimate_amount) and (not self._is_blankish(tender_meta.get("estimated_cost"))):
+            estimate_amount = str(tender_meta.get("estimated_cost")).strip()
+
+        bid_structure = self._extract_bid_structure(cleaned_text)
+        important_notes = self._extract_important_notes(cleaned_text, tender_meta=tender_meta, limit=4)
+
+        lines = [
+            "Tender Summary",
+            f"1) CDR / Bid Security: {cdr_amount}",
+            f"2) Lot Wise or Item Wise: {bid_structure}",
+            f"3) Total Estimate Amount: {estimate_amount}",
+            "4) Important Notes:",
+        ]
+        if len(important_notes) == 0:
+            lines.append("- N/A")
+        else:
+            for item in important_notes:
+                lines.append(f"- {item}")
+        return "\n".join(lines)
+
+    def _build_punjab_summary(self, tender_meta, doc_ref):
+        if tender_meta is None:
+            tender_meta = {}
+
+        title = str(tender_meta.get("title", "")).strip() or "N/A"
+        department = str(tender_meta.get("department", "")).strip() or "N/A"
+        city = str(tender_meta.get("city", "")).strip() or "N/A"
+        category = str(tender_meta.get("category", "")).strip() or "N/A"
+        tender_type = str(tender_meta.get("type", "")).strip() or "N/A"
+        date_opening = str(tender_meta.get("date_opening", "")).strip() or "N/A"
+
+        lines = [
+            "Punjab Tender Summary",
+            "Document scraping is skipped for Punjab. Sharing major info from the tender title/record:",
+            f"1) Tender Title: {title}",
+            f"2) Department: {department}",
+            f"3) City: {city}",
+            f"4) Category / Type: {category} / {tender_type}",
+            f"5) Bid Opening Date: {date_opening}",
+            "6) Document Link(s):",
+        ]
+
+        links = self._split_document_links(doc_ref)
+        if len(links) == 0:
+            lines.append("- N/A")
+        else:
+            for idx, link in enumerate(links, start=1):
+                lines.append(f"{idx}) {link}")
+        return "\n".join(lines)
+
+    def ai_summary(self,tender_id,table):
+        phone = str(self.api.sender).strip() if self.api.sender is not None else ""
+        tender_no = str(tender_id).strip() if tender_id is not None else ""
+        tender_table = str(table).strip() if table is not None else ""
+
+        if phone == "" or tender_no == "" or tender_table == "":
+            self.api.send_message("Unable to generate summary. Missing tender details.")
+            return [False, "invalid_input"]
+
+        usage_resp = self._get_ai_summary_usage(phone)
+        usage_tracking = True
+        if not usage_resp[0]:
+            # Usage lookup failed; continue with a fresh counter and attempt to write later.
+            used_count = 0
+            row_id = None
+        else:
+            used_count = usage_resp[1]
+            row_id = usage_resp[2]
+            if used_count >= 50:
+                self.api.send_message("Monthly AI Summary limit reached (50/50). Please try again next month.")
+                return [False, "limit_reached"]
+
+        tender_cols = [
+            "document",
+            "title",
+            "department",
+            "city",
+            "category",
+            "date_published",
+            "date_opening",
+        ]
+        if tender_table == "sindh_table":
+            tender_cols.append("estimated_cost")
+        else:
+            tender_cols.append("type")
+
+        tender_payload = {
+            "db": "tenderwala",
+            "table": tender_table,
+            "cols": tender_cols,
+            "ops": "SELECT",
+            "where": ["id"],
+            "value": [tender_no]
+        }
+        tender_resp = db_execute(tender_payload)
+        if not tender_resp.get("status"):
+            self.api.send_message("Unable to fetch tender details for summary right now.")
+            return [False, str(tender_resp)]
+
+        rows = tender_resp.get("data", [])
+        if len(rows) == 0:
+            self.api.send_message("Tender not found for AI summary.")
+            return [False, "tender_not_found"]
+
+        row = rows[0]
+        tender_map = {}
+        for i in range(len(tender_cols)):
+            tender_map[tender_cols[i]] = row[i] if len(row) > i else None
+
+        doc_ref = tender_map.get("document")
+        tender_meta = {
+            "title": tender_map.get("title"),
+            "department": tender_map.get("department"),
+            "city": tender_map.get("city"),
+            "category": tender_map.get("category"),
+            "type": tender_map.get("type"),
+            "date_published": tender_map.get("date_published"),
+            "date_opening": tender_map.get("date_opening"),
+            "estimated_cost": tender_map.get("estimated_cost"),
+        }
+
+        if tender_table != "punjab_table" and (doc_ref is None or str(doc_ref).strip() == "" or str(doc_ref).lower() == "none"):
+            self.api.send_message("Document is not available for this tender. Cannot generate AI summary.")
+            return [False, "doc_not_found"]
+
+        self.api.send_message("Preparing tender summary. Please wait...")
+
+        local_path = None
+        cleanup_required = False
+        try:
+            if tender_table == "punjab_table":
+                summary_text = self._build_punjab_summary(tender_meta, doc_ref)
+            else:
+                dl_resp = self._download_doc_for_summary(doc_ref, tender_table)
+                if not dl_resp[0]:
+                    self.api.send_message("Unable to download document for summary right now.")
+                    return [False, dl_resp[1]]
+
+                local_path = dl_resp[2]
+                cleanup_required = dl_resp[3]
+                doc_text = self._extract_doc_text(local_path)
+                summary_text = self._build_programmatic_summary(doc_text, tender_meta=tender_meta)
+
+            next_count = used_count + 1
+            final_text = summary_text
+
+            if len(final_text) > 3200:
+                final_text = final_text[:3200] + "..."
+
+            sent = self.api.send_message(final_text)
+            if not sent:
+                self.api.send_message("Unable to send AI summary right now. Please try again.")
+                return [False, "send_failed"]
+
+            count_updated = self._set_ai_summary_usage(phone, next_count, row_id=row_id)
+            if not count_updated:
+                self.api.send_message("Summary sent, but usage counter could not be updated.")
+
+            return [True]
+        finally:
+            if cleanup_required and local_path and os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except Exception:
+                    pass
+    def remind_me(self,tender_id,table):
+        phone = str(self.api.sender).strip() if self.api.sender is not None else ""
+        tender_no = str(tender_id).strip() if tender_id is not None else ""
+        tender_table = str(table).strip() if table is not None else ""
+
+        if phone == "" or tender_no == "" or tender_table == "":
+            self.api.send_message("Unable to set reminder. Missing phone, tender number, or table.")
+            return [False, "invalid_input"]
+
+        # Keep original ask table name first, then fallback to reminder_me_table for compatibility.
+        active_table = None
+        for table_name in ["remind_table", "reminder_me_table"]:
+            table_check = {
+                "db": "tenderwala",
+                "table": table_name,
+                "cols": ["id"],
+                "ops": "SELECT",
+                "where": None,
+                "value": None
+            }
+            check_resp = db_execute(table_check)
+            if check_resp.get("status"):
+                active_table = table_name
+                break
+
+        if active_table is None:
+            self.api.send_message("Reminder service is not available right now. Please try again later.")
+            return [False, "table_not_found"]
+
+        exists_payload = {
+            "db": "tenderwala",
+            "table": active_table,
+            "cols": ["id"],
+            "ops": "SELECT",
+            "where": ["phone", "tender_id", "tender_table"],
+            "value": [phone, tender_no, tender_table]
+        }
+        exists_resp = db_execute(exists_payload)
+        if exists_resp.get("status") and len(exists_resp.get("data", [])) > 0:
+            self.api.send_message("Reminder already added for this tender.")
+            return [True, "already_exists"]
+
+        now_text = str(self.security_utils.get_datetime())
+
+        generated_id = uuid4().hex
+        insert_attempts = [
+            {
+                "cols": ["phone", "tender_id", "tender_table", "reminder_time", "status", "created_on"],
+                "value": [phone, tender_no, tender_table, now_text, "PENDING", now_text]
+            },
+            {
+                "cols": ["id", "phone", "tender_id", "tender_table", "reminder_time", "message", "status", "sent_on", "created_on"],
+                "value": [generated_id, phone, tender_no, tender_table, now_text, "", "PENDING", "", now_text]
+            },
+            {
+                "cols": ["id", "phone", "tender_id", "tender_table"],
+                "value": [generated_id, phone, tender_no, tender_table]
+            },
+            {
+                "cols": ["phone", "tender_id", "tender_table"],
+                "value": [phone, tender_no, tender_table]
+            }
+        ]
+
+        insert_resp = {"status": False, "message": "no_insert_attempted"}
+        for attempt in insert_attempts:
+            payload = {
+                "db": "tenderwala",
+                "table": active_table,
+                "cols": attempt["cols"],
+                "ops": "INSERT",
+                "where": None,
+                "value": attempt["value"]
+            }
+            insert_resp = db_execute(payload)
+            if insert_resp.get("status"):
+                break
+
+        if insert_resp.get("status"):
+            self.api.send_message("Reminder saved! I will notify you when reminder time is reached! :)")
+            return [True]
+
+        self.api.send_message("Unable to save reminder right now. Please try again.")
+        return [False, str(insert_resp)]

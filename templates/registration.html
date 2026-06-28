@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TenderWala Settings</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --text: #10213a;
+      --muted: #5f6f86;
+      --border: #d7e0ea;
+      --primary: #1f6feb;
+      --primary-dark: #1757b7;
+      --success-bg: #e9f8ef;
+      --success-text: #0d6b2f;
+      --error-bg: #fdeaea;
+      --error-text: #9a1f1f;
+      --shadow: 0 18px 45px rgba(16, 33, 58, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: linear-gradient(180deg, #eef4fb 0%, var(--bg) 100%);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+
+    .hero {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 32px;
+      line-height: 1.2;
+    }
+
+    .hero p {
+      margin: 0 auto;
+      max-width: 720px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      padding: 24px;
+    }
+
+    .phone-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-size: 14px;
+      color: var(--muted);
+      background: #f8fbff;
+      margin-bottom: 20px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .field,
+    .city-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      background: #fcfdff;
+    }
+
+    .field label,
+    .city-card label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .help {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    select[multiple] {
+      width: 100%;
+      min-height: 188px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+      font-size: 14px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    select[multiple]:focus {
+      outline: 2px solid rgba(31, 111, 235, 0.18);
+      border-color: var(--primary);
+    }
+
+    .section-title {
+      margin: 28px 0 10px;
+      font-size: 20px;
+    }
+
+    .section-copy {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .city-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .city-empty {
+      border: 1px dashed var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      background: #fafcff;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+
+    .status {
+      flex: 1 1 280px;
+      min-height: 48px;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-size: 14px;
+      line-height: 1.5;
+      display: none;
+    }
+
+    .status.show {
+      display: block;
+    }
+
+    .status.success {
+      background: var(--success-bg);
+      color: var(--success-text);
+      border: 1px solid #b9ebc8;
+    }
+
+    .status.error {
+      background: var(--error-bg);
+      color: var(--error-text);
+      border: 1px solid #f2c0c0;
+    }
+
+    .save-btn {
+      border: 0;
+      border-radius: 999px;
+      background: var(--primary);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      padding: 14px 22px;
+      cursor: pointer;
+      min-width: 170px;
+      transition: background 0.2s ease, transform 0.2s ease;
+    }
+
+    .save-btn:hover {
+      background: var(--primary-dark);
+      transform: translateY(-1px);
+    }
+
+    .save-btn:disabled {
+      opacity: 0.7;
+      cursor: wait;
+      transform: none;
+    }
+
+    @media (max-width: 820px) {
+      .grid,
+      .city-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .card {
+        padding: 18px;
+      }
+
+      .hero h1 {
+        font-size: 28px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="hero">
+      <h1>TenderWala Filter Settings</h1>
+      <p>Select one or more Provinces, Cities, Categories, and Types. Use Ctrl/Cmd or long-press on mobile where supported to multi-select from each dropdown.</p>
+    </div>
+
+    <div class="card">
+      <div class="phone-pill">Linked Phone: <strong id="phone-text"></strong></div>
+
+      <div class="grid">
+        <div class="field">
+          <label for="province-select">Provinces</label>
+          <p class="help">Choose one or more provinces. City selectors will appear only for the selected provinces.</p>
+          <select id="province-select" multiple></select>
+        </div>
+
+        <div class="field">
+          <label for="type-select">Types</label>
+          <p class="help">Choose any mix of goods, works, and services. Leave it unselected to save as <code>empty</code>.</p>
+          <select id="type-select" multiple></select>
+        </div>
+
+        <div class="field" style="grid-column: 1 / -1;">
+          <label for="category-select">Categories</label>
+          <p class="help">Choose the business categories you want to receive. Leaving this empty saves the <code>empty</code> keyword.</p>
+          <select id="category-select" multiple></select>
+        </div>
+      </div>
+
+      <h2 class="section-title">Cities</h2>
+      <p class="section-copy">Each selected province gets its own city selector so the saved values map correctly into the matching field inside <code>filters_table</code>.</p>
+      <div id="city-groups" class="city-grid"></div>
+
+      <div class="actions">
+        <div id="status-box" class="status" aria-live="polite"></div>
+        <button id="save-btn" class="save-btn" type="button">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const pageData = {{ page_data|tojson }};
+    const provinceSelect = document.getElementById("province-select");
+    const typeSelect = document.getElementById("type-select");
+    const categorySelect = document.getElementById("category-select");
+    const cityGroupsContainer = document.getElementById("city-groups");
+    const saveButton = document.getElementById("save-btn");
+    const statusBox = document.getElementById("status-box");
+    const phoneText = document.getElementById("phone-text");
+
+    const selectedState = {
+      provinces: [...(pageData.selected.provinces || [])],
+      types: [...(pageData.selected.types || [])],
+      categories: [...(pageData.selected.categories || [])],
+      cities: { ...(pageData.selected.cities || {}) }
+    };
+
+    function fillMultiSelect(selectElement, options, selectedValues) {
+      selectElement.innerHTML = "";
+      const selectedSet = new Set((selectedValues || []).map(Number));
+      options.forEach((option) => {
+        const opt = document.createElement("option");
+        opt.value = String(option.value);
+        opt.textContent = option.label;
+        opt.selected = selectedSet.has(Number(option.value));
+        selectElement.appendChild(opt);
+      });
+    }
+
+    function getSelectedValues(selectElement) {
+      return Array.from(selectElement.selectedOptions).map((option) => Number(option.value));
+    }
+
+    function rememberVisibleCitySelections() {
+      const cards = cityGroupsContainer.querySelectorAll("[data-city-field]");
+      cards.forEach((card) => {
+        const field = card.getAttribute("data-city-field");
+        const select = card.querySelector("select");
+        selectedState.cities[field] = getSelectedValues(select);
+      });
+    }
+
+    function renderCityGroups() {
+      rememberVisibleCitySelections();
+      cityGroupsContainer.innerHTML = "";
+
+      const selectedProvinceIds = getSelectedValues(provinceSelect);
+      if (selectedProvinceIds.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "city-empty";
+        empty.textContent = "No province is selected yet. Choose one or more provinces to unlock city selectors.";
+        cityGroupsContainer.appendChild(empty);
+        return;
+      }
+
+      let renderedCount = 0;
+      selectedProvinceIds.forEach((provinceId) => {
+        const group = pageData.options.cityGroups[String(provinceId)];
+        if (!group) {
+          return;
+        }
+
+        const wrapper = document.createElement("div");
+        wrapper.className = "city-card";
+        wrapper.setAttribute("data-city-field", group.field);
+
+        const label = document.createElement("label");
+        label.setAttribute("for", "city-" + group.field);
+        label.textContent = group.provinceName + " Cities";
+
+        const help = document.createElement("p");
+        help.className = "help";
+        help.textContent = "Choose the cities you want for " + group.provinceName + ".";
+
+        const select = document.createElement("select");
+        select.id = "city-" + group.field;
+        select.multiple = true;
+
+        fillMultiSelect(select, group.options, selectedState.cities[group.field] || []);
+        select.addEventListener("change", () => {
+          selectedState.cities[group.field] = getSelectedValues(select);
+        });
+
+        wrapper.appendChild(label);
+        wrapper.appendChild(help);
+        wrapper.appendChild(select);
+        cityGroupsContainer.appendChild(wrapper);
+        renderedCount += 1;
+      });
+
+      if (renderedCount === 0) {
+        const empty = document.createElement("div");
+        empty.className = "city-empty";
+        empty.textContent = "The selected province does not require a city selector.";
+        cityGroupsContainer.appendChild(empty);
+      }
+    }
+
+    function setStatus(message, type) {
+      statusBox.textContent = message;
+      statusBox.className = "status show " + type;
+    }
+
+    async function saveSettings() {
+      rememberVisibleCitySelections();
+
+      const payload = {
+        phone: pageData.phone,
+        provinces: getSelectedValues(provinceSelect),
+        types: getSelectedValues(typeSelect),
+        categories: getSelectedValues(categorySelect),
+        cities: selectedState.cities
+      };
+
+      saveButton.disabled = true;
+      saveButton.textContent = "Saving...";
+      setStatus("Saving your settings...", "success");
+
+      try {
+        const response = await fetch("/registration/save", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok || !result.status) {
+          throw new Error(result.message || "Unable to save settings right now.");
+        }
+        setStatus("Settings saved successfully. You can return to WhatsApp and continue using TenderWala.", "success");
+        const redirectUrl = result.redirect_url || ("/registration/done?phone=" + encodeURIComponent(pageData.phone));
+        window.location.href = redirectUrl;
+      } catch (error) {
+        setStatus(error.message || "Unable to save settings right now.", "error");
+      } finally {
+        saveButton.disabled = false;
+        saveButton.textContent = "Save Settings";
+      }
+    }
+
+    phoneText.textContent = pageData.phone;
+    fillMultiSelect(provinceSelect, pageData.options.provinces, selectedState.provinces);
+    fillMultiSelect(typeSelect, pageData.options.types, selectedState.types);
+    fillMultiSelect(categorySelect, pageData.options.categories, selectedState.categories);
+
+    provinceSelect.addEventListener("change", renderCityGroups);
+    saveButton.addEventListener("click", saveSettings);
+
+    renderCityGroups();
+  </script>
+</body>
+</html>
