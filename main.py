@@ -386,7 +386,7 @@ def _notify_admin_punjab_push(text):
 
 @app.route('/')
 def main():
-    return {"message":"TenderWala Backend is live"}
+    return {"message":"TenderWala Backend is live", "deploy_probe":"auto-deploy-ok"}
 
 
 @app.route('/registration')
