@@ -855,7 +855,7 @@ Reply with Contact Us if you need assistance.
         if low in [
             "hi", "hello", "hey", "assalam o alaikum", "assalamualaikum",
             "salam", "ok", "thanks", "thank you", "payment done", "contact us",
-            "send tenders", "change settings", "change language", "benefits",
+            "change settings", "change language", "benefits",
             "free demo", "get old tenders"
         ] or len(low) < 5:
             return [False, query]
@@ -957,9 +957,60 @@ Reply with Contact Us if you need assistance.
 
     def _direct_ask_stop_words(self):
         return {
-            "a", "about", "all", "an", "any", "for", "from", "get", "give", "latest",
-            "me", "need", "of", "please", "related", "search", "send", "share", "show",
-            "tell", "tender", "tenders", "the", "to", "want"
+            "a", "about", "all", "an", "any", "ap", "aap", "are", "bata", "batao",
+            "bataye", "batayen", "bhej", "bhejo", "bhejdo", "can", "could", "de", "dein",
+            "do", "for", "from", "get", "give", "hain", "hai", "ho", "i", "is", "ka", "ke",
+            "ki", "kia", "kro", "kya", "latest", "me", "mere", "mje", "mujhay", "mujhe",
+            "mujhy", "need", "of", "pas", "please", "related", "sakta", "sakte", "sakti",
+            "sakty", "search", "send", "share", "show", "skta", "skte", "skty", "tell",
+            "tender", "tenders", "the", "to", "want", "will", "would", "you"
+        }
+
+    def _is_roman_urdu_tender_query(self, query_text):
+        raw = str(query_text).strip()
+        if raw == "" or re.search(r"[\u0600-\u06FF]", raw):
+            return False
+
+        normalized = self._normalize_match_text(raw)
+        markers = {
+            "aap", "ap", "kia", "kya", "mujhe", "mujhy", "mujhay", "mje", "mere",
+            "bhej", "bhejo", "bhejdo", "sakty", "sakte", "skty", "skte", "hain", "hai",
+            "chahiye", "kar", "kro", "dein"
+        }
+        hits = sum(1 for token in normalized.split() if token in markers)
+        return hits >= 2
+
+    def _generic_tender_redirect_message(self, query_text):
+        if self._is_roman_urdu_tender_query(query_text):
+            return (
+                "Ji, mere pas tenders ka bara database hai. "
+                "Apni specific tender requirement bhej dein, misal: Islamia University Bahawalpur ke tenders."
+            )
+        return (
+            "Yes, I have a large tenders database. "
+            "Please send a specific tender query, for example: Islamia University Bahawalpur tenders."
+        )
+
+    def _analyze_tender_query_intent(self, query_text):
+        detect_resp = self._looks_like_tender_search_query(query_text)
+        if not detect_resp[0]:
+            return {
+                "is_tender_related": False,
+                "is_specific": False,
+                "query": str(query_text).strip(),
+                "terms": [],
+                "redirect_message": ""
+            }
+
+        search_query = str(detect_resp[1]).strip() or str(query_text).strip()
+        parsed = self._extract_direct_ask_terms(search_query)
+        is_specific = len(parsed["terms"]) > 0
+        return {
+            "is_tender_related": True,
+            "is_specific": is_specific,
+            "query": search_query,
+            "terms": parsed["terms"],
+            "redirect_message": "" if is_specific else self._generic_tender_redirect_message(query_text)
         }
 
     def _extract_direct_ask_terms(self, query_text):
@@ -1095,10 +1146,13 @@ Reply with Contact Us if you need assistance.
         return "\n".join(lines)
 
     def try_auto_tender_search(self, query_text):
-        detect_resp = self._looks_like_tender_search_query(query_text)
-        if not detect_resp[0]:
+        intent = self._analyze_tender_query_intent(query_text)
+        if not intent["is_tender_related"]:
             return [False, "not_tender_search"]
-        search_query = str(detect_resp[1]).strip() or str(query_text).strip()
+        if not intent["is_specific"]:
+            self.api.send_message(intent["redirect_message"])
+            return [True, "generic_redirect"]
+        search_query = intent["query"]
         search_resp = self.direct_ask(search_query)
         status_text = search_resp[1] if isinstance(search_resp, list) and len(search_resp) > 1 else ""
         return [True, status_text]
@@ -1108,6 +1162,11 @@ Reply with Contact Us if you need assistance.
         if query == "":
             self.api.send_message("Please send your tender requirement.")
             return [False, "empty_query"]
+
+        intent = self._analyze_tender_query_intent(query)
+        if intent["is_tender_related"] and not intent["is_specific"]:
+            self.api.send_message(intent["redirect_message"])
+            return [True, "generic_redirect"]
 
         data_resp = self._load_training_tenders()
         if not data_resp[0]:
