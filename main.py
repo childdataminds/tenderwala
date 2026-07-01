@@ -1,5 +1,5 @@
 from flask import Flask, send_from_directory,render_template,request,jsonify
-import json,datetime,random,requests, asyncio, aiohttp,re
+import json,datetime,random,requests, asyncio, aiohttp,re,subprocess,hmac,hashlib
 from geopy.geocoders import Nominatim
 import pytz,os
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -14,6 +14,8 @@ from flask_caching import Cache
 tenderwala = TenderWala()
 
 VERIFY_TOKEN = "tenderwala_secure_2026"
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+DEPLOY_SCRIPT_PATH = os.getenv("DEPLOY_SCRIPT_PATH", "/var/www/tenderwala/deploy.sh")
 
 global sent
 sent = False
@@ -23,6 +25,31 @@ global registered_user
 registered_user = False
 global paid_user
 paid_user = False
+
+
+def _verify_github_signature(payload):
+    if GITHUB_WEBHOOK_SECRET == "":
+        return False
+
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not signature.startswith("sha256="):
+        return False
+
+    expected_signature = "sha256=" + hmac.new(
+        GITHUB_WEBHOOK_SECRET.encode("utf-8"),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected_signature)
+
+
+def _trigger_deploy_script():
+    subprocess.Popen(
+        ["/bin/bash", DEPLOY_SCRIPT_PATH],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
 
 
 def handle_whatsapp_button(tenderwala, button_id, title):
@@ -605,6 +632,33 @@ def upload():
     file = request.files['file']
     file.save(os.path.join("uploads", file.filename))
     return {"status": "uploaded"}
+
+
+@app.route('/github-webhook', methods=['POST'])
+def github_webhook():
+    if GITHUB_WEBHOOK_SECRET == "":
+        return jsonify({"status": False, "message": "GITHUB_WEBHOOK_SECRET is not configured"}), 500
+
+    payload = request.get_data()
+    if not _verify_github_signature(payload):
+        return jsonify({"status": False, "message": "Invalid GitHub signature"}), 403
+
+    if request.headers.get("X-GitHub-Event", "") != "push":
+        return jsonify({"status": True, "message": "Ignored non-push event"}), 200
+
+    data = request.get_json(silent=True) or {}
+    if data.get("ref") != "refs/heads/main":
+        return jsonify({"status": True, "message": "Ignored non-main branch push"}), 200
+
+    if not os.path.isfile(DEPLOY_SCRIPT_PATH):
+        return jsonify({"status": False, "message": f"Deploy script not found: {DEPLOY_SCRIPT_PATH}"}), 500
+
+    try:
+        _trigger_deploy_script()
+    except Exception as exc:
+        return jsonify({"status": False, "message": f"Deploy trigger failed: {str(exc)}"}), 500
+
+    return jsonify({"status": True, "message": "Deploy triggered"}), 202
 
 
 
