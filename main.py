@@ -14,7 +14,7 @@ from flask_caching import Cache
 tenderwala = TenderWala()
 
 VERIFY_TOKEN = "tenderwala_secure_2026"
-GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+GITHUB_WEBHOOK_SECRET = "tenderwala_github_secure_2026"
 DEPLOY_SCRIPT_PATH = os.getenv("DEPLOY_SCRIPT_PATH", "/var/www/tenderwala/deploy.sh")
 
 global sent
