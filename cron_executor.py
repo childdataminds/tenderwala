@@ -924,7 +924,7 @@ class ReminderCron:
 class TrainingCron:
     def __init__(self) -> None:
         pass
-    def start(self):
+    def start(self, target=None):
         tenderwala = TenderWala()
         tenderwala.api.sender = ADMIN_PHONE
         resp = main()
