@@ -955,6 +955,86 @@ Reply with Contact Us if you need assistance.
         )
         return recents[:min(limit, 25)]
 
+    def _direct_ask_stop_words(self):
+        return {
+            "a", "about", "all", "an", "any", "for", "from", "get", "give", "latest",
+            "me", "need", "of", "please", "related", "search", "send", "share", "show",
+            "tell", "tender", "tenders", "the", "to", "want"
+        }
+
+    def _extract_direct_ask_terms(self, query_text):
+        normalized = self._normalize_match_text(query_text)
+        if normalized == "":
+            return {"phrase": "", "terms": []}
+
+        terms = []
+        stop_words = self._direct_ask_stop_words()
+        for token in normalized.split():
+            if token in stop_words or token.isdigit():
+                continue
+            if len(token) <= 2 and token not in ["ai", "it"]:
+                continue
+            terms.append(token)
+
+        return {
+            "phrase": " ".join(terms).strip(),
+            "terms": terms
+        }
+
+    def _strict_direct_ask_matches(self, query_text, tenders, limit=5):
+        parsed = self._extract_direct_ask_terms(query_text)
+        terms = parsed["terms"]
+        phrase = parsed["phrase"]
+        if len(terms) == 0:
+            return []
+
+        ranked = []
+        for tender in tenders:
+            title = self._normalize_match_text(tender.get("title", ""))
+            dept = self._normalize_match_text(tender.get("department", ""))
+            cat = self._normalize_match_text(tender.get("category", ""))
+            city = self._normalize_match_text(tender.get("city", ""))
+            tender_type = self._normalize_match_text(tender.get("type", ""))
+            province_name = self._normalize_match_text(tender.get("province_name", ""))
+            text = self._normalize_match_text(title, dept, cat, city, tender_type, province_name)
+            padded_text = f" {text} "
+
+            if not all(f" {term} " in padded_text for term in terms):
+                continue
+
+            phrase_score = 1 if phrase != "" and f" {phrase} " in padded_text else 0
+            title_hits = sum(1 for term in terms if f" {term} " in f" {title} ")
+            dept_hits = sum(1 for term in terms if f" {term} " in f" {dept} ")
+            city_hits = sum(1 for term in terms if f" {term} " in f" {city} ")
+            date_score = self._parse_tender_datetime(tender.get("date_published"))
+            if date_score is None:
+                date_score = self._parse_tender_datetime(tender.get("date_opening"))
+
+            ranked.append((phrase_score, title_hits, dept_hits, city_hits, date_score or datetime.datetime.min, tender))
+
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]), reverse=True)
+        return [item[5] for item in ranked[:limit]]
+
+    def _direct_ask_table_context(self, table_name):
+        table_map = {
+            "federal_table": ("Federal", "federal_cities"),
+            "punjab_table": ("Punjab", "punjab_cities"),
+            "sindh_table": ("Sindh", "sindh_cities"),
+            "kpk_table": ("KPK", "kpk_cities"),
+            "ajk_table": ("AJK", "ajk_cities"),
+            "gilgit_table": ("Gilgit", "gilgit_cities"),
+            "balochistan_table": ("Balochistan", "balochistan_cities")
+        }
+        province_name, city_col = table_map.get(
+            table_name,
+            (str(table_name).replace("_table", "").replace("_", " ").title(), f"{str(table_name).split('_')[0]}_cities")
+        )
+        return {
+            "province_name": province_name,
+            "city_col": city_col,
+            "cities": []
+        }
+
     def _fallback_relevant_tenders(self, query, tenders):
         words = [w for w in re.findall(r"[a-zA-Z0-9]+", str(query).lower()) if len(w) > 2]
         ranked = []
@@ -1039,59 +1119,41 @@ Reply with Contact Us if you need assistance.
             self.api.send_message("No tenders found in model file. Please refresh training data.")
             return [False, "no_tenders"]
 
-        tenders = self._rank_training_tenders(query, tenders, limit=120)
+        selected = self._strict_direct_ask_matches(query, tenders, limit=5)
+        if len(selected) == 0:
+            self.api.send_message("I could not find tenders matching your exact query right now.")
+            return [False, "no_match"]
 
-        openai_key, model = self._openai_config()
-        if openai_key != "":
-            payload = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a tender assistant. Return max 5 latest relevant tenders in concise WhatsApp style. "
-                            "Include title, department, city, category, opening date, and tender reference (id/table). "
-                            "If nothing is clearly relevant, say that no strong tender match was found."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"User query: {query}\n"
-                            + "Tenders JSON: "
-                            + json.dumps(tenders, ensure_ascii=False)[:18000]
-                        )
-                    }
-                ],
-                "temperature": 0.2
-            }
-            headers = {
-                "Authorization": f"Bearer {openai_key}",
-                "Content-Type": "application/json"
-            }
+        sent_count = 0
+        for tender_meta in selected:
+            table_name = str(tender_meta.get("table", "")).strip()
+            tender_id = tender_meta.get("id")
+            if table_name == "" or tender_id in [None, ""]:
+                continue
+
+            tender_resp = self.api.utils.get_tenders(table_name, None, ["id"], [tender_id])
+            if not tender_resp[0] or len(tender_resp[1]) == 0:
+                continue
+
+            tender = tender_resp[1][0]
             try:
-                resp = requests.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=60
-                )
-                if resp.status_code == 200:
-                    answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                    if answer != "":
-                        self.api.send_message(answer[:3200])
-                        return [True]
+                if self.security_utils.check_expiry(str(tender[5]), table=table_name):
+                    continue
             except Exception:
                 pass
 
-        # Fallback ranking if OpenAI key is missing or request fails.
-        selected = self._fallback_relevant_tenders(query, tenders)
-        if len(selected) == 0:
-            self.api.send_message("I could not find relevant tenders for your query right now.")
-            return [False, "no_match"]
+            table_context = self._direct_ask_table_context(table_name)
+            if self._deliver_single_tender(table_name, table_context, tender, mark_sent=False, use_template=False):
+                sent_count += 1
 
-        self.api.send_message(self._format_tender_summary_list(selected)[:3200])
-        return [True]
+            if sent_count >= 5:
+                break
+
+        if sent_count == 0:
+            self.api.send_message("I could not find active tenders matching your exact query right now.")
+            return [False, "no_active_match"]
+
+        return [True, f"sent_{sent_count}"]
 
     def register_step_btn_resp(self,button_id):
         col = button_id
