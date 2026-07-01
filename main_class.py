@@ -229,14 +229,13 @@ class TenderWala:
     def paid_user_func(self):
         name = self.api.sender_name if self.api.sender_name else "Customer"
         txt = f"""
-Welcome back, {name}!
+👋 *Welcome back, {name}!*
 
-Your TenderWala account is active and ready.
-Available functions:
-1- Send Tenders
-2- Change Settings
-3- Change Language
-4- Search tenders by message
+✅ *Your TenderWala account is active.*
+
+We are ready to help you with your tender updates.
+
+Please choose an option below to continue.
 """
         self.paid_user = True
         return txt
