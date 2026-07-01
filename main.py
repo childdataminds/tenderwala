@@ -7,6 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from main_class import TenderWala,cities,ADMIN_PHONE
 from backend import db_execute,province,prov_cities,types,categories
 from flask_caching import Cache
+from train_tenders import main as train_tenders_main
 
 # from ppra_scraping import Faderal_Scraper
 
@@ -389,6 +390,15 @@ def _notify_admin_punjab_push(text):
 @app.route('/')
 def main():
     return {"message":"TenderWala Backend is live", "deploy_probe":"auto-deploy-ok"}
+
+
+@app.route('/start_training', methods=['GET'])
+def start_training():
+    try:
+        resp = train_tenders_main()
+        return jsonify({"status": True, "message": "Training completed", "result": resp}), 200
+    except Exception as exc:
+        return jsonify({"status": False, "message": f"Training failed: {str(exc)}"}), 500
 
 
 @app.route('/registration')
