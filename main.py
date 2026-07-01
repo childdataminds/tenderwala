@@ -57,7 +57,7 @@ def handle_whatsapp_button(tenderwala, button_id, title):
         tenderwala._send_registration_web_link(change_settings=False)
     elif button_id.startswith("plan_") or button_id == "payment_done" or button_id.startswith("admin_payment_"):
         tenderwala.handle_button(button_id)
-    elif title == "Change Language!":
+    elif button_id == "change_language" or title in ["Change Language!", "Change Language"]:
         lang_resp = tenderwala.change_language()
         if lang_resp[0]:
             tenderwala.resend_previous_step()
@@ -81,9 +81,9 @@ def handle_whatsapp_button(tenderwala, button_id, title):
             tenderwala.register_step_btn_resp(button_id)
     elif title == "Benefits":
         tenderwala.benefits()
-    elif title == "Change Settings":
+    elif button_id == "change_settings" or title == "Change Settings":
         tenderwala.change_settings_func()
-    elif button_id == "send_more_tenders" or title == "Send Tenders":
+    elif button_id in ["send_more_tenders", "send_tenders"] or title == "Send Tenders":
         tenderwala.api.send_message("Fetching tenders based on your settings. Please wait...")
         resp = tenderwala.send_tenders()
         if not resp[0]:
@@ -671,7 +671,14 @@ def policy_doc():
 
                 # Send reply (IMPORTANT: you must use Meta send API here)
                 if not button_msg:
-                   tenderwala.api.send_btn_msg(txt,["Change Language!"])
+                   if tenderwala.api.user_type == "PAID":
+                       tenderwala.api.send_btn_msg(
+                           txt,
+                           ["Send Tenders", "Change Settings", "Change Language"],
+                           ["send_tenders", "change_settings", "change_language"]
+                       )
+                   else:
+                       tenderwala.api.send_btn_msg(txt, ["Change Language!"])
 
             # 🔘 BUTTON REPLY
             elif message['type'] == "button":
