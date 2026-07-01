@@ -1,0 +1,18 @@
+[Unit]
+Description=TenderWala Deploy Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/var/www/tenderwala
+Environment=APP_DIR=/var/www/tenderwala
+Environment=APP_SERVICE_NAME=tenderwala
+Environment=DEPLOY_RUN_AS=www-data
+Environment=DEPLOY_LOG_PATH=/var/log/tenderwala-deploy.log
+ExecStart=/bin/bash /var/www/tenderwala/deploy.sh
+
+[Install]
+WantedBy=multi-user.target

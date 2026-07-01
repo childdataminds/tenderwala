@@ -1,0 +1,8 @@
+# Replace www-data with the Linux user running the TenderWala app service.
+#
+# Install with:
+#   sudo visudo -f /etc/sudoers.d/tenderwala-webhook
+#
+# Then paste the line below.
+
+www-data ALL=NOPASSWD: /bin/systemctl start tenderwala-deploy.service

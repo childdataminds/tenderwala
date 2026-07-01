@@ -16,6 +16,8 @@ tenderwala = TenderWala()
 VERIFY_TOKEN = "tenderwala_secure_2026"
 GITHUB_WEBHOOK_SECRET = "tenderwala_github_secure_2026"
 DEPLOY_SCRIPT_PATH = os.getenv("DEPLOY_SCRIPT_PATH", "/var/www/tenderwala/deploy.sh")
+DEPLOY_SERVICE_NAME = os.getenv("DEPLOY_SERVICE_NAME", "tenderwala-deploy.service")
+WEBHOOK_DEPLOY_LOG_PATH = os.getenv("WEBHOOK_DEPLOY_LOG_PATH", "/var/www/tenderwala/deploy-webhook.log")
 
 global sent
 sent = False
@@ -43,13 +45,33 @@ def _verify_github_signature(payload):
     return hmac.compare_digest(signature, expected_signature)
 
 
-def _trigger_deploy_script():
-    subprocess.Popen(
-        ["/bin/bash", DEPLOY_SCRIPT_PATH],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True
+def _append_deploy_log(message):
+    try:
+        with open(WEBHOOK_DEPLOY_LOG_PATH, "a", encoding="utf-8") as log_file:
+            timestamp = datetime.datetime.utcnow().isoformat() + "Z"
+            log_file.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        pass
+
+
+def _trigger_deploy_service():
+    cmd = ["sudo", "-n", "systemctl", "start", DEPLOY_SERVICE_NAME]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=20
     )
+    if result.returncode != 0:
+        error_parts = []
+        if str(result.stdout).strip() != "":
+            error_parts.append(str(result.stdout).strip())
+        if str(result.stderr).strip() != "":
+            error_parts.append(str(result.stderr).strip())
+        error_text = " | ".join(error_parts).strip()
+        if error_text == "":
+            error_text = f"Deploy trigger failed with exit code {result.returncode}"
+        raise RuntimeError(error_text[:500])
 
 
 def handle_whatsapp_button(tenderwala, button_id, title):
@@ -364,10 +386,7 @@ def _notify_admin_punjab_push(text):
 
 @app.route('/')
 def main():
-    return {
-        "message": "TenderWala Backend is live",
-        "deploy_test": "github-webhook-check"
-    }
+    return {"message":"TenderWala Backend is live"}
 
 
 @app.route('/registration')
@@ -643,25 +662,36 @@ def github_webhook():
         return jsonify({"status": False, "message": "GITHUB_WEBHOOK_SECRET is not configured"}), 500
 
     payload = request.get_data()
+    delivery_id = request.headers.get("X-GitHub-Delivery", "")
+    event_type = request.headers.get("X-GitHub-Event", "")
     if not _verify_github_signature(payload):
+        _append_deploy_log(f"Rejected delivery={delivery_id} event={event_type}: invalid signature")
         return jsonify({"status": False, "message": "Invalid GitHub signature"}), 403
 
-    if request.headers.get("X-GitHub-Event", "") != "push":
+    if event_type != "push":
+        _append_deploy_log(f"Ignored delivery={delivery_id}: non-push event {event_type}")
         return jsonify({"status": True, "message": "Ignored non-push event"}), 200
 
     data = request.get_json(silent=True) or {}
     if data.get("ref") != "refs/heads/main":
+        _append_deploy_log(f"Ignored delivery={delivery_id}: branch {data.get('ref')}")
         return jsonify({"status": True, "message": "Ignored non-main branch push"}), 200
 
     if not os.path.isfile(DEPLOY_SCRIPT_PATH):
+        _append_deploy_log(f"Failed delivery={delivery_id}: deploy script missing at {DEPLOY_SCRIPT_PATH}")
         return jsonify({"status": False, "message": f"Deploy script not found: {DEPLOY_SCRIPT_PATH}"}), 500
 
     try:
-        _trigger_deploy_script()
+        _append_deploy_log(
+            f"Accepted delivery={delivery_id}: branch main, starting {DEPLOY_SERVICE_NAME}"
+        )
+        _trigger_deploy_service()
     except Exception as exc:
+        _append_deploy_log(f"Failed delivery={delivery_id}: {str(exc)}")
         return jsonify({"status": False, "message": f"Deploy trigger failed: {str(exc)}"}), 500
 
-    return jsonify({"status": True, "message": "Deploy triggered"}), 202
+    _append_deploy_log(f"Started delivery={delivery_id}: {DEPLOY_SERVICE_NAME}")
+    return jsonify({"status": True, "message": f"Deploy service {DEPLOY_SERVICE_NAME} started"}), 202
 
 
 
