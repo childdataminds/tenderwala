@@ -18,6 +18,8 @@ GITHUB_WEBHOOK_SECRET = "tenderwala_github_secure_2026"
 DEPLOY_SCRIPT_PATH = os.getenv("DEPLOY_SCRIPT_PATH", "/var/www/tenderwala/deploy.sh")
 DEPLOY_SERVICE_NAME = os.getenv("DEPLOY_SERVICE_NAME", "tenderwala-deploy.service")
 WEBHOOK_DEPLOY_LOG_PATH = os.getenv("WEBHOOK_DEPLOY_LOG_PATH", "/var/www/tenderwala/deploy-webhook.log")
+SUDO_BIN_PATH = "/bin/sudo"
+SYSTEMCTL_BIN_PATH = "/bin/systemctl"
 
 global sent
 sent = False
@@ -55,7 +57,7 @@ def _append_deploy_log(message):
 
 
 def _trigger_deploy_service():
-    cmd = ["sudo", "-n", "systemctl", "start", DEPLOY_SERVICE_NAME]
+    cmd = [SUDO_BIN_PATH, "-n", SYSTEMCTL_BIN_PATH, "start", DEPLOY_SERVICE_NAME]
     result = subprocess.run(
         cmd,
         capture_output=True,
