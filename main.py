@@ -776,6 +776,8 @@ def policy_doc():
                            ["Send Tenders", "Change Settings", "Change Language"],
                            ["send_tenders", "change_settings", "change_language"]
                        )
+                   elif tenderwala.api.user_type == "UNPAID":
+                       tenderwala.send_subscription_options()
                    else:
                        tenderwala.api.send_btn_msg(txt, ["Change Language!"])
 

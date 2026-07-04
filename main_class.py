@@ -23,6 +23,54 @@ HARDCODED_OPENAI_MODEL = "gpt-4o-mini"
 
 class TenderWala:
         # --- Subscription Payment Flow ---
+    def _ensure_subscription_context(self):
+        if not hasattr(self, "subscription_context"):
+            self.subscription_context = {}
+
+    def _subscription_plan_map(self):
+        return {
+            "plan_1m": {
+                "name": "1-Month Plan",
+                "price": "PKR 2,000/-",
+                "duration_days": 30,
+                "button_title": "1 Month Plan"
+            },
+            "plan_3m": {
+                "name": "3-Month Plan",
+                "price": "PKR 5,000/-",
+                "duration_days": 90,
+                "button_title": "3 Month Plan",
+                "discount": "16% OFF"
+            },
+            "plan_1y": {
+                "name": "1-Year Plan",
+                "price": "PKR 12,000/-",
+                "duration_days": 365,
+                "button_title": "1 Year Plan",
+                "discount": "50% OFF"
+            }
+        }
+
+    def subscription_menu_message(self):
+        name = self.api.sender_name if self.api.sender_name else "Customer"
+        if self.lang.type == "ur":
+            return (
+                f"{name}, aap ki subscription active nahi hai.\n\n"
+                "Subscribe karne ke liye apna plan select karein."
+            )
+        return (
+            f"{name}, your subscription is currently inactive.\n\n"
+            "Please choose a plan to subscribe or renew your TenderWala access."
+        )
+
+    def send_subscription_options(self):
+        plan_map = self._subscription_plan_map()
+        return self.api.send_btn_msg(
+            self.subscription_menu_message(),
+            [plan_map["plan_1m"]["button_title"], plan_map["plan_3m"]["button_title"], plan_map["plan_1y"]["button_title"]],
+            ["plan_1m", "plan_3m", "plan_1y"]
+        )
+
     def _parse_datetime(self, raw_value):
         if raw_value is None:
             return None
@@ -81,27 +129,42 @@ class TenderWala:
     def handle_subscription_button(self, button_id):
         # Step 1: User selects a plan
         if button_id in ["plan_1m", "plan_3m", "plan_1y"]:
-            plan_map = {"plan_1m": "1 Month", "plan_3m": "3 Months", "plan_1y": "1 Year"}
-            self.api.session = getattr(self.api, 'session', {})
-            self.api.session['selected_plan'] = plan_map[button_id]
-            if self._is_within_24h_window(self.api.sender):
-                sent = self.api.send_btn_msg(
-                    "Kindly press confirm after processing payment.",
-                    ["Payment Done"],
-                    ["payment_done"]
-                )
-            else:
-                sent = self.api.send_template_msg(
-                    "renewal_confirmation",
-                    body_params=[self.api.sender_name or "Customer", plan_map[button_id]]
-                )
+            self._ensure_subscription_context()
+            plan_info = self._subscription_plan_map()[button_id]
+            self.subscription_context[str(self.api.sender).strip()] = {
+                "button_id": button_id,
+                "plan_name": plan_info["name"],
+                "duration_days": plan_info["duration_days"]
+            }
+            plan_text = (
+                f"*{plan_info['name']}*\n"
+                f"Price: *{plan_info['price']}*"
+            )
+            if plan_info.get("discount"):
+                plan_text += f"\nDiscount: *{plan_info['discount']}*"
+
+            msg = (
+                f"{plan_text}\n\n"
+                "Bank Details:\n"
+                "Bank: *HBL*\n"
+                "Account #: *53157000286003*\n"
+                "Title: *Syed Mubashir*\n\n"
+                "After making payment, press *Confirm Payment*."
+            )
+            sent = self.api.send_btn_msg(
+                msg,
+                ["Confirm Payment"],
+                ["payment_done"]
+            )
             if sent:
                 self._mark_user_texted(self.api.sender)
             return
 
         # Step 2: User presses Payment Done
         if button_id == "payment_done":
-            plan = self.api.session.get('selected_plan', "Unknown Plan") if hasattr(self.api, 'session') else "Unknown Plan"
+            self._ensure_subscription_context()
+            selected = self.subscription_context.get(str(self.api.sender).strip(), {})
+            plan = selected.get("plan_name", "Unknown Plan")
             user_name = self.api.sender_name or "Customer"
             user_contact = self.api.sender
             admin_msg = (
@@ -131,7 +194,7 @@ class TenderWala:
                 plan = parts[2]
                 # Calculate new subs_date
                 from datetime import datetime, timedelta
-                days = 30 if "1 Month" in plan else (90 if "3 Month" in plan else 365)
+                days = 30 if "1-Month" in plan else (90 if "3-Month" in plan else 365)
                 new_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
                 self.api.utils.update_user_status(user_contact, "PAID")
                 payload = {
@@ -184,6 +247,7 @@ class TenderWala:
         self.img_url = "https://tenderwala.thedataminds.us/media/"
         self.web_registration_url = "https://tenderwala.thedataminds.us/registration"
         self.settings_edit_context = {}
+        self.subscription_context = {}
     def setup(self,value):
         message = value['messages'][0]
         self.api.sender = message['from']
@@ -240,21 +304,7 @@ Please choose an option below to continue.
         self.paid_user = True
         return txt
     def unpaid_user_func(self):
-        name = self.api.sender_name if self.api.sender_name else "Customer"
-        if self.lang.type == "ur":
-            txt = f"""
-{name}, aap ki subscription active nahi hai.
-
-Tenders dobara receive karne ke liye apni subscription renew/subscribe karein.
-Madad ke liye Contact Us par reply karein.
-"""
-        else:
-            txt = f"""
-{name}, your subscription is currently inactive.
-
-Please subscribe again to continue receiving daily tenders.
-Reply with Contact Us if you need assistance.
-"""
+        txt = self.subscription_menu_message()
         self.registered_user = True
         return txt
     def visitor_user_func(self):
@@ -338,7 +388,7 @@ Reply with Contact Us if you need assistance.
             self.api.send_btn_msg(self.paid_user_func(), ["Change Language!"])
             return True
         if status_norm == "UNPAID":
-            self.api.send_btn_msg(self.unpaid_user_func(), ["Change Language!"])
+            self.send_subscription_options()
             return True
         if status_norm == "VISITOR":
             self.visitor_user_func()
@@ -454,7 +504,7 @@ Reply with Contact Us if you need assistance.
             self.api.send_btn_msg(self.paid_user_func(), ["Change Language!"])
             return True
         if user_type == "UNPAID":
-            self.api.send_btn_msg(self.unpaid_user_func(), ["Change Language!"])
+            self.send_subscription_options()
             return True
         return False
 
