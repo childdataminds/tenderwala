@@ -126,6 +126,10 @@ class TenderWala:
         except Exception:
             pass
 
+    def _ensure_ai_summary_context(self):
+        if not hasattr(self, "ai_summary_inflight"):
+            self.ai_summary_inflight = set()
+
     def handle_subscription_button(self, button_id):
         # Step 1: User selects a plan
         if button_id in ["plan_1m", "plan_3m", "plan_1y"]:
@@ -248,6 +252,7 @@ class TenderWala:
         self.web_registration_url = "https://tenderwala.thedataminds.us/registration"
         self.settings_edit_context = {}
         self.subscription_context = {}
+        self.ai_summary_inflight = set()
     def setup(self,value):
         message = value['messages'][0]
         self.api.sender = message['from']
@@ -3639,6 +3644,12 @@ Please choose an option below to continue.
             self.api.send_message("Document is not available for this tender. Cannot generate AI summary.")
             return [False, "doc_not_found"]
 
+        self._ensure_ai_summary_context()
+        summary_key = f"{phone}::{tender_table}::{tender_no}"
+        if summary_key in self.ai_summary_inflight:
+            return [False, "summary_already_in_progress"]
+
+        self.ai_summary_inflight.add(summary_key)
         self.api.send_message("Preparing tender summary. Please wait...")
 
         local_path = None
@@ -3674,6 +3685,7 @@ Please choose an option below to continue.
 
             return [True]
         finally:
+            self.ai_summary_inflight.discard(summary_key)
             if cleanup_required and local_path and os.path.exists(local_path):
                 try:
                     os.remove(local_path)
