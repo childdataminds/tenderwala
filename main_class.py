@@ -1222,6 +1222,9 @@ Please choose an option below to continue.
         intent = self._analyze_tender_query_intent(query_text)
         if not intent["is_tender_related"]:
             return [False, "not_tender_search"]
+        if not self._can_use_direct_ask():
+            self._send_direct_ask_subscription_notice()
+            return [True, "subscription_required"]
         if not intent["is_specific"]:
             self.api.send_message(intent["redirect_message"])
             return [True, "generic_redirect"]
@@ -1235,6 +1238,9 @@ Please choose an option below to continue.
         if query == "":
             self.api.send_message("Please send your tender requirement.")
             return [False, "empty_query"]
+        if not self._can_use_direct_ask():
+            self._send_direct_ask_subscription_notice()
+            return [False, "subscription_required"]
 
         intent = self._analyze_tender_query_intent(query)
         if intent["is_tender_related"] and not intent["is_specific"]:
@@ -1393,6 +1399,35 @@ Please choose an option below to continue.
             + f"☹️*Sending Failed*: {int(result.get('send_failed', 0))}"
         )
         self.api.send_message(msg[:3200])
+
+    def _can_use_direct_ask(self):
+        user_type = str(getattr(self.api, "user_type", "")).strip().upper()
+        return user_type == "TRIAL" or self._is_paid_status(user_type)
+
+    def _send_direct_ask_subscription_notice(self):
+        if self.lang.type == "ur":
+            msg = (
+                "AI tender search sirf Trial aur Paid users ke liye available hai.\n\n"
+                "Direct tender search use karne ke liye subscription lein."
+            )
+        else:
+            msg = (
+                "AI tender search is available for Trial and Paid users only.\n\n"
+                "Please subscribe to use direct tender search."
+            )
+
+        plan_map = self._subscription_plan_map()
+        sent = self.api.send_btn_msg(
+            msg,
+            [
+                plan_map["plan_1m"]["button_title"],
+                plan_map["plan_3m"]["button_title"],
+                plan_map["plan_1y"]["button_title"]
+            ],
+            ["plan_1m", "plan_3m", "plan_1y"]
+        )
+        if not sent:
+            self.api.send_message(msg)
 
     def _normalize_match_text(self, *parts):
         merged = " ".join([str(part).strip().lower() for part in parts if str(part).strip() != ""])
