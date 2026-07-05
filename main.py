@@ -107,7 +107,7 @@ def handle_whatsapp_button(tenderwala, button_id, title):
         tenderwala.api.send_message("Your subscription is unchanged.")
     elif button_id == "complete_registration" or title == "Complete":
         tenderwala._send_registration_web_link(change_settings=False)
-    elif button_id.startswith("plan_") or button_id == "payment_done" or button_id.startswith("admin_payment_"):
+    elif button_id.startswith("plan_") or button_id.startswith("payment_done") or button_id.startswith("admin_payment_"):
         tenderwala.handle_button(button_id)
     elif button_id == "change_language" or title in ["Change Language!", "Change Language"]:
         lang_resp = tenderwala.change_language()

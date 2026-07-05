@@ -23,33 +23,41 @@ HARDCODED_OPENAI_MODEL = "gpt-4o-mini"
 
 class TenderWala:
         # --- Subscription Payment Flow ---
-    def _ensure_subscription_context(self):
-        if not hasattr(self, "subscription_context"):
-            self.subscription_context = {}
-
     def _subscription_plan_map(self):
         return {
             "plan_1m": {
-                "name": "1-Month Plan",
+                "name": "1-Month",
+                "full_name": "1-Month Plan",
+                "status": "PAID-1M",
                 "price": "PKR 2,000/-",
                 "duration_days": 30,
                 "button_title": "1 Month Plan"
             },
             "plan_3m": {
-                "name": "3-Month Plan",
+                "name": "3-Month",
+                "full_name": "3-Month Plan",
+                "status": "PAID-3M",
                 "price": "PKR 5,000/-",
                 "duration_days": 90,
                 "button_title": "3 Month Plan",
                 "discount": "16% OFF"
             },
             "plan_1y": {
-                "name": "1-Year Plan",
+                "name": "1-Year",
+                "full_name": "1-Year Plan",
+                "status": "PAID-1Y",
                 "price": "PKR 12,000/-",
                 "duration_days": 365,
                 "button_title": "1 Year Plan",
                 "discount": "50% OFF"
             }
         }
+
+    def _get_subscription_plan(self, plan_code):
+        return self._subscription_plan_map().get(str(plan_code).strip().lower())
+
+    def _is_paid_status(self, status_text):
+        return str(status_text or "").strip().upper().startswith("PAID")
 
     def subscription_menu_message(self):
         name = self.api.sender_name if self.api.sender_name else "Customer"
@@ -133,15 +141,12 @@ class TenderWala:
     def handle_subscription_button(self, button_id):
         # Step 1: User selects a plan
         if button_id in ["plan_1m", "plan_3m", "plan_1y"]:
-            self._ensure_subscription_context()
-            plan_info = self._subscription_plan_map()[button_id]
-            self.subscription_context[str(self.api.sender).strip()] = {
-                "button_id": button_id,
-                "plan_name": plan_info["name"],
-                "duration_days": plan_info["duration_days"]
-            }
+            plan_info = self._get_subscription_plan(button_id)
+            if plan_info is None:
+                self.api.send_message("Invalid subscription plan selected.")
+                return
             plan_text = (
-                f"*{plan_info['name']}*\n"
+                f"*{plan_info['full_name']}*\n"
                 f"Price: *{plan_info['price']}*"
             )
             if plan_info.get("discount"):
@@ -158,17 +163,22 @@ class TenderWala:
             sent = self.api.send_btn_msg(
                 msg,
                 ["Confirm Payment"],
-                ["payment_done"]
+                [f"payment_done|{button_id}"]
             )
             if sent:
                 self._mark_user_texted(self.api.sender)
             return
 
         # Step 2: User presses Payment Done
-        if button_id == "payment_done":
-            self._ensure_subscription_context()
-            selected = self.subscription_context.get(str(self.api.sender).strip(), {})
-            plan = selected.get("plan_name", "Unknown Plan")
+        if button_id == "payment_done" or str(button_id).startswith("payment_done|"):
+            parts = str(button_id).split("|", 1)
+            plan_code = parts[1] if len(parts) > 1 else ""
+            plan_info = self._get_subscription_plan(plan_code)
+            if plan_info is None:
+                self.api.send_message("Please select a subscription plan first, then confirm payment.")
+                return
+
+            plan = plan_info["full_name"]
             user_name = self.api.sender_name or "Customer"
             user_contact = self.api.sender
             admin_msg = (
@@ -183,7 +193,7 @@ class TenderWala:
             self.api.send_btn_msg(
                 admin_msg,
                 ["Yes", "No"],
-                [f"admin_payment_yes|{user_contact}|{plan}", f"admin_payment_no|{user_contact}|{plan}"]
+                [f"admin_payment_yes|{user_contact}|{plan_code}", f"admin_payment_no|{user_contact}|{plan_code}"]
             )
             self.api.sender = user_contact  # Restore sender
             self.api.send_message("Your payment confirmation has been sent to admin. You'll be notified once approved.")
@@ -191,16 +201,22 @@ class TenderWala:
 
         # Step 3: Admin presses Yes/No
         if button_id.startswith("admin_payment_yes"):
-            # Format: admin_payment_yes|user_contact|plan
+            # Format: admin_payment_yes|user_contact|plan_code
             parts = button_id.split("|")
             if len(parts) >= 3:
                 user_contact = parts[1]
-                plan = parts[2]
-                # Calculate new subs_date
+                plan_code = parts[2]
+                plan_info = self._get_subscription_plan(plan_code)
+                if plan_info is None:
+                    self.api.send_message(f"Unable to activate subscription for {user_contact}. Invalid plan.")
+                    return
+
+                plan = plan_info["full_name"]
+                paid_status = plan_info["status"]
                 from datetime import datetime, timedelta
-                days = 30 if "1-Month" in plan else (90 if "3-Month" in plan else 365)
+                days = int(plan_info["duration_days"])
                 new_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-                self.api.utils.update_user_status(user_contact, "PAID")
+                self.api.utils.update_user_status(user_contact, paid_status)
                 payload = {
                     "db": "tenderwala",
                     "table": "users_table",
@@ -227,13 +243,15 @@ class TenderWala:
                 if sent:
                     self._mark_user_texted(user_contact)
                 self.api.sender = "923056842507"  # Restore admin
-                self.api.send_message(f"User {user_contact} subscription activated for {plan}.")
+                self.api.send_message(f"User {user_contact} subscription activated for {plan} with status {paid_status}.")
             return
         if button_id.startswith("admin_payment_no"):
             parts = button_id.split("|")
             if len(parts) >= 3:
                 user_contact = parts[1]
-                plan = parts[2]
+                plan_code = parts[2]
+                plan_info = self._get_subscription_plan(plan_code)
+                plan = plan_info["full_name"] if plan_info is not None else "Unknown Plan"
                 self.api.sender = user_contact
                 self.api.send_message("Your payment could not be confirmed. Please contact support if you have already paid.")
                 self.api.sender = "923056842507"
@@ -251,7 +269,6 @@ class TenderWala:
         self.img_url = "https://tenderwala.thedataminds.us/media/"
         self.web_registration_url = "https://tenderwala.thedataminds.us/registration"
         self.settings_edit_context = {}
-        self.subscription_context = {}
         self.ai_summary_inflight = set()
     def setup(self,value):
         message = value['messages'][0]
@@ -276,7 +293,8 @@ class TenderWala:
                 lang_ = "en"
         else:
                 # print("resp: ",user_resp[1])
-                self.api.user_type = user_resp[1][2]
+                raw_status = str(user_resp[1][2]).strip().upper()
+                self.api.user_type = "PAID" if self._is_paid_status(raw_status) else raw_status
                 lang_ = "en"
                 if len(user_resp[1]) > 6 and str(user_resp[1][6]).strip().lower() in ["ur", "en"]:
                     lang_ = str(user_resp[1][6]).strip().lower()
@@ -389,7 +407,7 @@ Please choose an option below to continue.
         if status_norm == "REGISTERING":
             self._send_registration_web_link(change_settings=False)
             return True
-        if status_norm == "PAID":
+        if self._is_paid_status(status_norm):
             self.api.send_btn_msg(self.paid_user_func(), ["Change Language!"])
             return True
         if status_norm == "UNPAID":
@@ -505,7 +523,7 @@ Please choose an option below to continue.
         if user_type == "VISITOR":
             self.visitor_user_func()
             return True
-        if user_type == "PAID":
+        if self._is_paid_status(user_type):
             self.api.send_btn_msg(self.paid_user_func(), ["Change Language!"])
             return True
         if user_type == "UNPAID":
