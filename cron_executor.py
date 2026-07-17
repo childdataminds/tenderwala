@@ -666,31 +666,85 @@ class AdminWindowReminderCron:
 class StatusHandlerCron:
     def __init__(self) -> None:
         self.utilities = Utilities()
+        self.notify = TenderWala()
+        self.notify.api.sender = ADMIN_PHONE
+        self.dispatcher = CronMessageDispatcher()
+
+    def _parse_subs_date(self, raw_value):
+        return self.dispatcher._parse_datetime(raw_value)
+
+    def _trial_membership_message(self, lang, name, days_left):
+        if lang == "ur":
+            if days_left <= 0:
+                return (
+                    f"{name}, aap ka 3 din ka trial khatam ho gaya hai. "
+                    "Paid member ban kar exclusive services hasil karein aur tenders receive karna jari rakhein."
+                )
+            return (
+                f"{name}, aap ka 3 din ka trial {days_left} din mein khatam ho raha hai. "
+                "Paid member ban kar exclusive services hasil karein aur service bina rukawat jari rakhein."
+            )
+        if days_left <= 0:
+            return (
+                f"{name}, your 3-day trial has ended. "
+                "Join as a paid member to continue receiving tenders and unlock exclusive services."
+            )
+        return (
+            f"{name}, your 3-day trial will end in {days_left} day(s). "
+            "Join as a paid member to continue receiving tenders and unlock exclusive services."
+        )
+
+    def _unpaid_membership_message(self, lang, name):
+        if lang == "ur":
+            return (
+                f"{name}, aap ki membership active nahi hai. "
+                "Paid member ban kar exclusive services aur daily tenders dobara hasil karein."
+            )
+        return (
+            f"{name}, your membership is inactive. "
+            "Rejoin as a paid member to resume daily tenders and access exclusive services."
+        )
+
+    def _send_membership_invite(self, phone, name, lang, message_text):
+        self.notify.api.sender = phone
+        self.notify.api.sender_name = name
+        self.notify._set_runtime_language(lang)
+
+        within_window = self.dispatcher.is_within_24h_window(phone)
+        if within_window:
+            sent = self.notify.api.send_btn_msg(
+                message_text,
+                ["1 Month Plan", "3 Month Plan", "1 Year Plan"],
+                ["plan_1m", "plan_3m", "plan_1y"]
+            )
+            mode = "button"
+        else:
+            send_resp = self.dispatcher.send(self.notify.api, phone, message_text, "renewal_reminder")
+            sent = send_resp[0]
+            mode = send_resp[1] if len(send_resp) > 1 else "template"
+
+        if sent:
+            try:
+                self.notify.api.utils.update_texted_on(
+                    phone,
+                    str(self.notify.security_utils.get_datetime())
+                )
+            except Exception:
+                pass
+        return [bool(sent), mode]
     
     # TO TRIGGER REGISTRATION FOR UNREGISTERED
     def reminders_for_registration(self):
-        users = self.utilities.get_unregistered_users()
-
-        tenderwala = TenderWala()
-        for user in users:
-            tenderwala.api.sender = user['phone']  # Set the sender's phone number
-            tenderwala.api.sender_name = user.get('name', 'Customer')  # Set the sender's name
-            tenderwala.api.user_type = "REGISTERING"  # Set user type to registering
-
-            # Trigger the registration process
-            tenderwala.registering_user("Hi")
-        
-    # TO TRIGGER SUBSCRIPTION FOR TRIAL ENDED OR UNPAID
-    def send_subscription_menu(self):
-        users_resp = self.utilities.get_unpaid_users()
+        users_resp = self.utilities.get_unregistered_users()
         if not users_resp[0]:
-            return [False, "No unpaid users found or query failed"]
+            return [False, users_resp[1] if len(users_resp) > 1 else "registration query failed"]
 
-        users = users_resp[1]
         sent = 0
         failed = 0
-        for row in users:
+        tenderwala = TenderWala()
+        for row in users_resp[1]:
             phone = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
+            status = str(row[1]).strip().upper() if len(row) > 1 and row[1] is not None else ""
             lang = str(row[2]).strip().lower() if len(row) > 2 and row[2] is not None else "en"
             name = str(row[3]).strip() if len(row) > 3 and row[3] is not None else "Customer"
 
@@ -698,47 +752,131 @@ class StatusHandlerCron:
                 failed += 1
                 continue
 
-            self.notify = TenderWala()
-            self.notify.api.sender = phone
-            self.notify.api.sender_name = name
-
-            if lang == "ur":
-                msg = f"{name}, aapki subscription expire ho chuki hai. Barah-e-karam kisi plan par dobara subscribe karein taake TenderWala istemal karte rahain."
-            else:
-                msg = f"{name}, your subscription has expired. Please resubscribe to one of our plans to continue using TenderWala"
-
+            tenderwala.api.sender = phone
+            tenderwala.api.sender_name = name
+            tenderwala.api.user_type = status if status != "" else "REGISTERING"
+            tenderwala._set_runtime_language(lang)
             try:
-                ok = self.notify.api.send_btn_msg(
-                    msg,
-                    ["1 Month Plan", "3 Month Plan", "1 Year Plan"],
-                    ["plan_1m", "plan_3m", "plan_1y"],
-                )
-                if ok:
-                    sent += 1
-                    # update last_texted_on if util available
-                    try:
-                        self.notify.api.utils.update_texted_on(phone, str(self.notify.security_utils.get_datetime()))
-                    except Exception:
-                        pass
-                else:
-                    # fallback to dispatcher template send
-                    send_resp = CronMessageDispatcher().send(self.notify.api, phone, msg, "renewal_reminder")
-                    if send_resp[0]:
-                        sent += 1
-                    else:
-                        failed += 1
+                tenderwala.registering_user("Hi")
+                sent += 1
             except Exception:
                 failed += 1
-
+        
         return [True, {"sent": sent, "failed": failed}]
+        
+    # TO TRIGGER SUBSCRIPTION FOR TRIAL ENDED OR UNPAID
+    def send_subscription_menu(self):
+        payload = {
+            "db": "tenderwala",
+            "table": "users_table",
+            "cols": ["phone", "status", "lang", "name", "subs_date"],
+            "ops": "SELECT",
+            "where": None,
+            "value": None
+        }
+        resp = db_execute(payload)
+        if not resp.get("status"):
+            return [False, str(resp)]
+
+        now = datetime.now()
+        trial_invites_sent = 0
+        unpaid_invites_sent = 0
+        trial_to_unpaid = 0
+        skipped = 0
+        failed = 0
+
+        for row in resp.get("data", []):
+            phone = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
+            status = str(row[1]).strip().upper() if len(row) > 1 and row[1] is not None else ""
+            lang = str(row[2]).strip().lower() if len(row) > 2 and row[2] is not None else "en"
+            name = str(row[3]).strip() if len(row) > 3 and row[3] is not None else "Customer"
+            subs_date = row[4] if len(row) > 4 else None
+
+            if phone == "":
+                skipped += 1
+                continue
+
+            if status == "TRIAL":
+                expiry_dt = self._parse_subs_date(subs_date)
+                if expiry_dt is None:
+                    skipped += 1
+                    continue
+
+                if expiry_dt <= now:
+                    status_resp = self.utilities.update_user_status(phone, "UNPAID")
+                    if not status_resp[0]:
+                        failed += 1
+                        continue
+                    status = "UNPAID"
+                    trial_to_unpaid += 1
+                    invite_msg = self._unpaid_membership_message(lang, name)
+                else:
+                    seconds_left = max(0, (expiry_dt - now).total_seconds())
+                    days_left = max(1, int((seconds_left + 86399) // 86400))
+                    invite_msg = self._trial_membership_message(lang, name, days_left)
+                    send_resp = self._send_membership_invite(phone, name, lang, invite_msg)
+                    if send_resp[0]:
+                        trial_invites_sent += 1
+                    else:
+                        failed += 1
+                    continue
+
+            if status == "UNPAID":
+                invite_msg = self._unpaid_membership_message(lang, name)
+                send_resp = self._send_membership_invite(phone, name, lang, invite_msg)
+                if send_resp[0]:
+                    unpaid_invites_sent += 1
+                else:
+                    failed += 1
+                continue
+
+            skipped += 1
+
+        return [True, {
+            "trial_invites_sent": trial_invites_sent,
+            "unpaid_invites_sent": unpaid_invites_sent,
+            "trial_to_unpaid": trial_to_unpaid,
+            "skipped": skipped,
+            "failed": failed
+        }]
 
 class RegistrationCron:
     def __init__(self) -> None:
         self.handler = StatusHandlerCron()
+        self.notify = TenderWala()
+        self.notify.api.sender = ADMIN_PHONE
+        self.dispatcher = CronMessageDispatcher()
 
     def start(self, target=None):
-        self.handler.reminders_for_registration()
-        self.handler.send_subscription_menu()
+        registration_resp = self.handler.reminders_for_registration()
+        membership_resp = self.handler.send_subscription_menu()
+
+        if not registration_resp[0]:
+            self.dispatcher.send(
+                self.notify.api,
+                ADMIN_PHONE,
+                f"registration cron registration-reminder failed: {registration_resp[1]}"
+            )
+        if not membership_resp[0]:
+            self.dispatcher.send(
+                self.notify.api,
+                ADMIN_PHONE,
+                f"registration cron membership-reminder failed: {membership_resp[1]}"
+            )
+
+        registration_stats = registration_resp[1] if registration_resp[0] and len(registration_resp) > 1 else {}
+        membership_stats = membership_resp[1] if membership_resp[0] and len(membership_resp) > 1 else {}
+        summary = (
+            "registration cron completed\n"
+            + f"*Registration reminders sent*: {int(registration_stats.get('sent', 0))}\n"
+            + f"*Registration reminder failed*: {int(registration_stats.get('failed', 0))}\n"
+            + f"*Trial invites sent*: {int(membership_stats.get('trial_invites_sent', 0))}\n"
+            + f"*UNPAID rejoin invites sent*: {int(membership_stats.get('unpaid_invites_sent', 0))}\n"
+            + f"*Trial converted to UNPAID*: {int(membership_stats.get('trial_to_unpaid', 0))}\n"
+            + f"*Skipped*: {int(membership_stats.get('skipped', 0))}\n"
+            + f"*Membership send failed*: {int(membership_stats.get('failed', 0))}"
+        )
+        self.dispatcher.send(self.notify.api, ADMIN_PHONE, summary)
         return "Registration Cron Completed"
 
 class ReminderCron:

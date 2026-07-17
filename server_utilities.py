@@ -132,20 +132,24 @@ class Utilities:
               return False,resp
         
     def get_unregistered_users(self):
-        payload =  {
-            "db":"tenderwala",
-            "table":"users_table",
-            "cols":None,
-            "ops":"SELECT",
-            "where":["status"],
-            "value":['visitor', 'registering']
+        payload = {
+            "db": "tenderwala",
+            "table": "users_table",
+            "cols": ["phone", "status", "lang", "name", "subs_date"],
+            "ops": "SELECT",
+            "where": None,
+            "value": None
         }
         resp = db_execute(payload)
-        if resp['status']:
-            if len(resp['data']) > 0:
-                return [True, resp['data']]
-            else:
-                return [False]
+        if not resp.get("status"):
+            return [False, str(resp)]
+
+        rows = []
+        for row in resp.get("data", []):
+            status = str(row[1]).strip().upper() if len(row) > 1 and row[1] is not None else ""
+            if status in ["VISITOR", "VISITORS", "REGISTERING"]:
+                rows.append(row)
+        return [True, rows]
     def update_user_status(self,phone,status):
          
          status_norm = str(status).strip().upper()
@@ -384,40 +388,50 @@ class Utilities:
         payload = {
             "db": "tenderwala",
             "table": "users_table",
-            "cols": None,  # Fetch all columns
+            "cols": ["phone", "status", "lang", "name", "subs_date"],
             "ops": "SELECT",
-            "where": ['status'],  # No filters to fetch all users
-            "value": ['unpaid']
+            "where": None,
+            "value": None
         }
         resp = db_execute(payload)
-        if resp["status"]:
-            if len(resp["data"]) > 0:
-                return [True, resp["data"]]
-            else:
-                return [False, "No users found."]
-        else:
+        if not resp.get("status"):
             return [False, str(resp)]
+
+        rows = []
+        for row in resp.get("data", []):
+            status = str(row[1]).strip().upper() if len(row) > 1 and row[1] is not None else ""
+            if status == "UNPAID":
+                rows.append(row)
+        return [True, rows]
         
     def get_trial_over_users(self):
-        from datetime import datetime
-        current_date = datetime.now().strftime('%Y-%m-%d')
-
         payload = {
             "db": "tenderwala",
             "table": "users_table",
-            "cols": None,  # Fetch all columns
+            "cols": ["phone", "status", "lang", "name", "subs_date"],
             "ops": "SELECT",
-            "where": ["status", "subs_date !="],
-            "value": ["trial", current_date]
+            "where": None,
+            "value": None
         }
         resp = db_execute(payload)
-        if resp["status"]:
-            if len(resp["data"]) > 0:
-                return [True, resp["data"]]
-            else:
-                return [False, "No users found."]
-        else:
+        if not resp.get("status"):
             return [False, str(resp)]
+
+        from datetime import datetime
+        now = datetime.now()
+        rows = []
+        for row in resp.get("data", []):
+            status = str(row[1]).strip().upper() if len(row) > 1 and row[1] is not None else ""
+            subs_date = row[4] if len(row) > 4 else None
+            if status != "TRIAL" or subs_date in [None, "", "None"]:
+                continue
+            try:
+                expiry_dt = datetime.fromisoformat(str(subs_date).replace("T", " ").replace("Z", ""))
+            except Exception:
+                continue
+            if expiry_dt <= now:
+                rows.append(row)
+        return [True, rows]
     
     
 
