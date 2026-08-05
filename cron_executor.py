@@ -96,11 +96,64 @@ class CronMessageDispatcher:
     def _resolve_template(self, api, preferred_template):
         preferred = str(preferred_template) if preferred_template else "welcome_msg"
         names = self._fetch_templates(api)
-        if len(names) == 0 or preferred in names:
+        if len(names) == 0 or preferred in names or preferred in getattr(api, "available_template_messages", {}):
             return preferred
         return names[0]
 
-    def send(self, api, phone, text, preferred_template="welcome_msg"):
+    def _default_template_payload(self, template_name, text=""):
+        today_text = datetime.now().strftime("%Y-%m-%d")
+        clean_text = str(text or "").strip()
+        defaults = {
+            "welcome_msg": {},
+            "renewal_reminder": {
+                "body_params": ["TenderWala Subscription", today_text]
+            },
+            "renewal_confirmation": {
+                "body_params": ["Customer", "TenderWala Subscription"]
+            },
+            "payment_success": {
+                "body_params": ["TenderWala Subscription"],
+                "button_payloads": ["send_more_tenders"]
+            },
+            "complete_registration": {
+                "button_payloads": ["complete_registration", "change_language"]
+            },
+            "re_join": {
+                "button_payloads": ["plan_1m", "plan_3m", "plan_1y"]
+            },
+            "more_tenders": {
+                "body_params": ["0"],
+                "button_payloads": ["send_more_tenders"]
+            },
+            "status_updated": {
+                "body_params": ["updated", "continue using TenderWala"]
+            },
+            "remind_tender": {
+                "header_params": ["Tender Reminder"],
+                "body_params": [
+                    "Tender follow-up",
+                    today_text,
+                    "TenderWala",
+                    "Pakistan",
+                    "Due now"
+                ],
+                "button_payloads": ["reminder_details", "reminder_done"]
+            },
+            "send_tenders": {
+                "body_params": [
+                    "Tender Update",
+                    today_text,
+                    today_text,
+                    "TenderWala",
+                    "Pakistan",
+                    clean_text if clean_text != "" else "Tender details are available in your account."
+                ],
+                "button_payloads": ["tender_docs", "tender_summary", "tender_remind"]
+            }
+        }
+        return dict(defaults.get(template_name, {}))
+
+    def send(self, api, phone, text, preferred_template="welcome_msg", template_payload=None):
         # Ensure text is a clean str (decode bytes if necessary)
         if isinstance(text, bytes):
             try:
@@ -113,7 +166,20 @@ class CronMessageDispatcher:
             return [sent, "message"]
 
         template_name = self._resolve_template(api, preferred_template)
-        sent = api.send_template_msg(template_name)
+        payload = self._default_template_payload(template_name, text)
+        if isinstance(template_payload, dict):
+            for key, value in template_payload.items():
+                if value is not None:
+                    payload[key] = value
+
+        sent = api.send_template_msg(
+            template_name,
+            body_params=payload.get("body_params"),
+            button_payloads=payload.get("button_payloads"),
+            language_code=payload.get("language_code", "en"),
+            button_sub_type=payload.get("button_sub_type", "quick_reply"),
+            header_params=payload.get("header_params")
+        )
         return [sent, f"template:{template_name}"]
 
 class ScrapingCron:
@@ -409,31 +475,45 @@ class MembershipCron:
 
             self.notify.api.sender = phone
             if expiry_dt < now:
-                # Build expired subscription message and send with plan buttons
-                msg = (
-                    f"{name}, your subscription has expired. Please resubscribe to one of our plans to continue using TenderWala"
-                )
-                # Ensure api sender is set
-                self.notify.api.sender = phone
+                msg = self._expired_message(lang, name)
+                reminder_date = expiry_dt.strftime("%Y-%m-%d")
+                within_window = self.dispatcher.is_within_24h_window(phone)
                 try:
-                    # Attempt to send interactive buttons (labels and ids)
-                    sent_btn = self.notify.api.send_btn_msg(
-                        msg,
-                        ["1 Month Plan", "3 Month Plan", "1 Year Plan"],
-                        ["plan_1m", "plan_3m", "plan_1y"],
-                    )
-                    # If send_btn_msg returns truthy/success, count as sent; otherwise fall back
+                    if within_window:
+                        sent_btn = self.notify.api.send_btn_msg(
+                            msg,
+                            ["1 Month Plan", "3 Month Plan", "1 Year Plan"],
+                            ["plan_1m", "plan_3m", "plan_1y"],
+                        )
+                    else:
+                        sent_btn = False
+
                     if sent_btn:
                         expired_sent += 1
                     else:
-                        send_resp = self.dispatcher.send(self.notify.api, phone, msg, "renewal_reminder")
+                        send_resp = self.dispatcher.send(
+                            self.notify.api,
+                            phone,
+                            msg,
+                            "renewal_reminder",
+                            template_payload={
+                                "body_params": [self.default_plan_name, reminder_date]
+                            }
+                        )
                         if send_resp[0]:
                             expired_sent += 1
                         else:
                             send_failed += 1
                 except Exception:
-                    # Fallback to template send via dispatcher on error
-                    send_resp = self.dispatcher.send(self.notify.api, phone, self._expired_message(lang, name), "renewal_reminder")
+                    send_resp = self.dispatcher.send(
+                        self.notify.api,
+                        phone,
+                        msg,
+                        "renewal_reminder",
+                        template_payload={
+                            "body_params": [self.default_plan_name, reminder_date]
+                        }
+                    )
                     if send_resp[0]:
                         expired_sent += 1
                     else:
@@ -669,6 +749,7 @@ class StatusHandlerCron:
         self.notify = TenderWala()
         self.notify.api.sender = ADMIN_PHONE
         self.dispatcher = CronMessageDispatcher()
+        self.default_plan_name = "TenderWala Subscription"
 
     def _parse_subs_date(self, raw_value):
         return self.dispatcher._parse_datetime(raw_value)
@@ -705,7 +786,7 @@ class StatusHandlerCron:
             "Rejoin as a paid member to resume daily tenders and access exclusive services."
         )
 
-    def _send_membership_invite(self, phone, name, lang, message_text):
+    def _send_membership_invite(self, phone, name, lang, message_text, template_payload=None):
         self.notify.api.sender = phone
         self.notify.api.sender_name = name
         self.notify._set_runtime_language(lang)
@@ -719,7 +800,13 @@ class StatusHandlerCron:
             )
             mode = "button"
         else:
-            send_resp = self.dispatcher.send(self.notify.api, phone, message_text, "renewal_reminder")
+            send_resp = self.dispatcher.send(
+                self.notify.api,
+                phone,
+                message_text,
+                "renewal_reminder",
+                template_payload=template_payload
+            )
             sent = send_resp[0]
             mode = send_resp[1] if len(send_resp) > 1 else "template"
 
@@ -814,7 +901,15 @@ class StatusHandlerCron:
                     seconds_left = max(0, (expiry_dt - now).total_seconds())
                     days_left = max(1, int((seconds_left + 86399) // 86400))
                     invite_msg = self._trial_membership_message(lang, name, days_left)
-                    send_resp = self._send_membership_invite(phone, name, lang, invite_msg)
+                    send_resp = self._send_membership_invite(
+                        phone,
+                        name,
+                        lang,
+                        invite_msg,
+                        template_payload={
+                            "body_params": [self.default_plan_name, expiry_dt.strftime("%Y-%m-%d")]
+                        }
+                    )
                     if send_resp[0]:
                         trial_invites_sent += 1
                     else:
@@ -823,7 +918,15 @@ class StatusHandlerCron:
 
             if status == "UNPAID":
                 invite_msg = self._unpaid_membership_message(lang, name)
-                send_resp = self._send_membership_invite(phone, name, lang, invite_msg)
+                send_resp = self._send_membership_invite(
+                    phone,
+                    name,
+                    lang,
+                    invite_msg,
+                    template_payload={
+                        "body_params": [self.default_plan_name, now.strftime("%Y-%m-%d")]
+                    }
+                )
                 if send_resp[0]:
                     unpaid_invites_sent += 1
                 else:
@@ -1029,7 +1132,15 @@ class ReminderCron:
 
             due_rows += 1
             txt = reminder_message if reminder_message != "" else self._build_default_msg(tender_id, tender_table)
-            send_resp = self.dispatcher.send(self.notify.api, phone, txt, "renewal_reminder")
+            send_resp = self.dispatcher.send(
+                self.notify.api,
+                phone,
+                txt,
+                "renewal_reminder",
+                template_payload={
+                    "body_params": ["Tender Reminder", now.strftime("%Y-%m-%d")]
+                }
+            )
             sent = send_resp[0]
             if sent:
                 sent_rows += 1

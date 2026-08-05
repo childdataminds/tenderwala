@@ -92,6 +92,36 @@ class metaWhatsappAPI:
         }
         
         self.register_steps = ["provinces","types","punjab_cities","sindh_cities","kpk_cities","ajk_cities","balochistan_cities","gilgit_cities","categories"]
+
+    def _coerce_template_values(self, provided_values, required_keys=None):
+        required_keys = required_keys or []
+        required_count = len(required_keys)
+
+        if isinstance(provided_values, dict):
+            ordered = []
+            for index, key in enumerate(required_keys):
+                ordered.append(
+                    provided_values.get(
+                        key,
+                        provided_values.get(str(key), provided_values.get(index, provided_values.get(str(index), "")))
+                    )
+                )
+            return ordered
+
+        if provided_values is None:
+            values = []
+        elif isinstance(provided_values, (list, tuple)):
+            values = list(provided_values)
+        else:
+            values = [provided_values]
+
+        if required_count > 0:
+            if len(values) < required_count:
+                values.extend([""] * (required_count - len(values)))
+            elif len(values) > required_count:
+                values = values[:required_count]
+
+        return values
         
     # ------------------ TEXT MESSAGE ------------------
     def send_message(self, text):
@@ -114,10 +144,14 @@ class metaWhatsappAPI:
 
     # ------------------ TEMPLATE MESSAGE ------------------
     def send_template_msg(self, temp_name, body_params=None, button_payloads=None, language_code="en", button_sub_type="quick_reply", header_params=None):
-        body_params = body_params or []
-        button_payloads = button_payloads or []
-        header_params = header_params or []
         template_meta = self.available_template_messages.get(temp_name, {})
+        header_fields = template_meta.get("header_params", [])
+        body_fields = template_meta.get("body_params", [])
+        button_meta = template_meta.get("buttons", [])
+
+        header_params = self._coerce_template_values(header_params, header_fields)
+        body_params = self._coerce_template_values(body_params, body_fields)
+        button_payloads = self._coerce_template_values(button_payloads, list(range(len(button_meta))))
 
         template = {
             "name": temp_name,
@@ -150,7 +184,6 @@ class metaWhatsappAPI:
                 ]
             })
 
-        button_meta = template_meta.get("buttons", [])
         for index, payload_value in enumerate(button_payloads):
             current_button_meta = button_meta[index] if index < len(button_meta) else {}
             current_sub_type = current_button_meta.get("sub_type", button_sub_type)
